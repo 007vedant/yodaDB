@@ -1,0 +1,17 @@
+# Build and test outputs
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# yodaDB database files created by examples and tests
+*.yoda
+*.yoda-lock
+*.yoda-tmp
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
