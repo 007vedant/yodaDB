@@ -1,2 +1,3 @@
-// Package parser will parse yodaDB SQL into an abstract syntax tree.
+// Package parser parses the supported SQL subset into a source-aware abstract
+// syntax tree.
 package parser

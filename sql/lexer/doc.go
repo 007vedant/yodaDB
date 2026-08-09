@@ -1,2 +1,2 @@
-// Package lexer will tokenize SQL while preserving source locations.
+// Package lexer tokenizes SQL while preserving byte, line, and column spans.
 package lexer
