@@ -806,15 +806,17 @@ Gate:
 
 Outcome: parse and execute the first useful SQL without persistence.
 
-| ID | Task | Depends on | Deliverable |
-|---|---|---|---|
-| M1.1 | Scalar values and type rules | M0 | `types.Value`, comparisons, null semantics |
-| M1.2 | Lexer | M0 | tokens, spans, lexer fuzz target |
-| M1.3 | Parser and AST | M1.2 | initial DDL/DML/SELECT grammar and golden tests |
-| M1.4 | In-memory catalog | M1.1 | stable IDs, table/column descriptors |
-| M1.5 | Binder/type checker | M1.1,M1.3,M1.4 | bound expressions and diagnostics |
-| M1.6 | Iterator executor | M1.5 | values, scan, filter, projection, insert |
-| M1.7 | API and CLI vertical integration | M1.6 | executable first demo |
+Status: **[x] verified (2026-08-09)**
+
+| ID | Status | Task | Depends on | Deliverable |
+|---|---|---|---|---|
+| M1.1 | [x] verified | Scalar values and type rules | M0 | `types.Value`, comparisons, null semantics |
+| M1.2 | [x] verified | Lexer | M0 | tokens, spans, lexer fuzz target |
+| M1.3 | [x] verified | Parser and AST | M1.2 | initial DDL/DML/SELECT grammar and golden tests |
+| M1.4 | [x] verified | In-memory catalog | M1.1 | stable IDs, table/column descriptors |
+| M1.5 | [x] verified | Binder/type checker | M1.1,M1.3,M1.4 | bound expressions and diagnostics |
+| M1.6 | [x] verified | Iterator executor | M1.5 | values, scan, filter, projection, insert |
+| M1.7 | [x] verified | API and CLI vertical integration | M1.6 | executable first demo |
 
 Gate scenario:
 
