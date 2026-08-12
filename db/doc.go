@@ -1,2 +1,2 @@
-// Package db will provide yodaDB's native public database API.
+// Package db provides yodaDB's native in-memory M1 database API.
 package db

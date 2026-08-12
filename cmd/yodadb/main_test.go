@@ -38,3 +38,20 @@ func TestRunRejectsDatabaseUntilImplemented(t *testing.T) {
 		t.Fatalf("error output %q does not explain unsupported operation", stderr.String())
 	}
 }
+
+func TestRunInMemorySQLScenario(t *testing.T) {
+	input := strings.NewReader("CREATE TABLE users (id INT64 PRIMARY KEY, name TEXT NOT NULL);\n" +
+		"INSERT INTO users VALUES (1, 'Ada');\n" +
+		"SELECT name FROM users WHERE id = 1;\n")
+	var stdout, stderr bytes.Buffer
+
+	if code := runWithInput(nil, input, &stdout, &stderr); code != 0 {
+		t.Fatalf("run shell returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Ada") {
+		t.Fatalf("shell output %q does not contain Ada", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("shell stderr = %q, want empty", stderr.String())
+	}
+}
