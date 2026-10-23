@@ -50,6 +50,10 @@ func NewLeafBuilderFromDecoded(leaf Leaf) *LeafBuilder {
 // Count returns the number of logical slots.
 func (b *LeafBuilder) Count() int { return len(b.entries) }
 
+// UsedBytes returns the encoded header, slots, and record bytes before the
+// payload's zero-filled free space. It is useful for choosing balanced splits.
+func (b *LeafBuilder) UsedBytes() int { return b.encodedSize() }
+
 // RightSibling returns the optional right-sibling page ID.
 func (b *LeafBuilder) RightSibling() ID { return b.rightSibling }
 

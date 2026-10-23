@@ -20,6 +20,9 @@ func TestLeafBuilderInsertDeleteRoundTrip(t *testing.T) {
 	if err := builder.Insert(2, []byte("c"), []byte("three")); err != nil {
 		t.Fatal(err)
 	}
+	if builder.UsedBytes() <= 16 {
+		t.Fatalf("used bytes = %d, want header plus entries", builder.UsedBytes())
+	}
 	if err := builder.Delete(1); err != nil {
 		t.Fatal(err)
 	}
