@@ -856,15 +856,17 @@ Gate:
 
 Outcome: durable ordered key/value access with immutable committed pages.
 
-| ID | Task | Depends on | Deliverable |
-|---|---|---|---|
-| M3.1 | Canonical index-key codec | M1.1,M2 | order-preserving composite keys |
-| M3.2 | Read-only traversal/cursor | M2 | lookup, seek, range scan |
-| M3.3 | COW leaf insertion/split | M3.1,M3.2 | immutable leaf updates |
-| M3.4 | Internal insertion/root split | M3.3 | arbitrary-height insertion |
-| M3.5 | Tombstone deletion | M3.4 | logical delete without merge |
-| M3.6 | Model/property test suite | M3.2-M3.5 | randomized comparison to sorted model |
-| M3.7 | Tree visualization | M3.4 | `pages --tree` diagnostic output |
+Status: **in progress**
+
+| ID | Status | Task | Depends on | Deliverable |
+|---|---|---|---|---|
+| M3.1 | [x] verified | Canonical index-key codec | M1.1,M2 | order-preserving composite keys |
+| M3.2 | [ ] | Read-only traversal/cursor | M2 | lookup, seek, range scan |
+| M3.3 | [ ] | COW leaf insertion/split | M3.1,M3.2 | immutable leaf updates |
+| M3.4 | [ ] | Internal insertion/root split | M3.3 | arbitrary-height insertion |
+| M3.5 | [ ] | Tombstone deletion | M3.4 | logical delete without merge |
+| M3.6 | [ ] | Model/property test suite | M3.2-M3.5 | randomized comparison to sorted model |
+| M3.7 | [ ] | Tree visualization | M3.4 | `pages --tree` diagnostic output |
 
 Gate:
 
