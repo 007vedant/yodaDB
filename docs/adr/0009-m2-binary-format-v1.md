@@ -4,6 +4,8 @@
 - Date: 2026-08-15
 - Owners: storage and types
 
+Leaf slot flags are extended for M3 tombstones by ADR 0012.
+
 ## Context
 
 M2 writes yodaDB's first persisted bytes. The conceptual layouts in `PLAN.md`

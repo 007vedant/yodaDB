@@ -13,12 +13,15 @@ const (
 	leafFormatVersion byte = 1
 	leafHeaderSize         = 16
 	leafSlotSize           = 8
+	leafFlagTombstone      = uint16(1 << 0)
+	leafKnownFlags         = leafFlagTombstone
 )
 
 // LeafEntry is one key/value record in logical slot order.
 type LeafEntry struct {
-	Key   []byte
-	Value []byte
+	Key       []byte
+	Value     []byte
+	Tombstone bool
 }
 
 // Leaf is a decoded slotted B+ tree leaf payload.
@@ -84,6 +87,17 @@ func (b *LeafBuilder) Insert(index int, key, value []byte) error {
 	return nil
 }
 
+// Tombstone marks an existing entry logically deleted and discards its value.
+// The key remains present so parent separator boundaries stay stable.
+func (b *LeafBuilder) Tombstone(index int) error {
+	if index < 0 || index >= len(b.entries) {
+		return dberrors.New(dberrors.CodeConstraint, "leaf.tombstone", fmt.Sprintf("slot %d outside [0,%d)", index, len(b.entries)))
+	}
+	b.entries[index].Value = nil
+	b.entries[index].Tombstone = true
+	return nil
+}
+
 // Delete removes one slot from the uncommitted builder.
 func (b *LeafBuilder) Delete(index int) error {
 	if index < 0 || index >= len(b.entries) {
@@ -109,6 +123,9 @@ func (b *LeafBuilder) Encode() ([]byte, error) {
 	binary.LittleEndian.PutUint64(payload[8:16], uint64(b.rightSibling))
 
 	for index, entry := range b.entries {
+		if entry.Tombstone && len(entry.Value) != 0 {
+			return nil, dberrors.New(dberrors.CodeConstraint, "leaf.encode", fmt.Sprintf("tombstone %d has a value", index))
+		}
 		record := make([]byte, 0, uvarintLength(uint64(len(entry.Key)))+len(entry.Key)+len(entry.Value))
 		record = binary.AppendUvarint(record, uint64(len(entry.Key)))
 		record = append(record, entry.Key...)
@@ -118,6 +135,9 @@ func (b *LeafBuilder) Encode() ([]byte, error) {
 		slotOffset := leafHeaderSize + index*leafSlotSize
 		binary.LittleEndian.PutUint16(payload[slotOffset:slotOffset+2], uint16(freeEnd))
 		binary.LittleEndian.PutUint16(payload[slotOffset+2:slotOffset+4], uint16(len(record)))
+		if entry.Tombstone {
+			binary.LittleEndian.PutUint16(payload[slotOffset+4:slotOffset+6], leafFlagTombstone)
+		}
 	}
 	binary.LittleEndian.PutUint16(payload[6:8], uint16(freeEnd))
 	return payload, nil
@@ -160,8 +180,12 @@ func DecodeLeaf(payload []byte) (Leaf, error) {
 		slotOffset := leafHeaderSize + index*leafSlotSize
 		recordOffset := int(binary.LittleEndian.Uint16(payload[slotOffset : slotOffset+2]))
 		recordLength := int(binary.LittleEndian.Uint16(payload[slotOffset+2 : slotOffset+4]))
-		if binary.LittleEndian.Uint16(payload[slotOffset+4:slotOffset+6]) != 0 || binary.LittleEndian.Uint16(payload[slotOffset+6:slotOffset+8]) != 0 {
-			return Leaf{}, corrupt(slotOffset+4, "slot flags and reserved bytes must be zero")
+		flags := binary.LittleEndian.Uint16(payload[slotOffset+4 : slotOffset+6])
+		if flags & ^leafKnownFlags != 0 {
+			return Leaf{}, corrupt(slotOffset+4, "slot contains unknown flags")
+		}
+		if binary.LittleEndian.Uint16(payload[slotOffset+6:slotOffset+8]) != 0 {
+			return Leaf{}, corrupt(slotOffset+6, "slot reserved bytes must be zero")
 		}
 		if recordLength == 0 || recordOffset < freeEnd || recordOffset > len(payload)-recordLength {
 			return Leaf{}, corrupt(slotOffset, "slot record range is outside packed record area")
@@ -180,7 +204,15 @@ func DecodeLeaf(payload []byte) (Leaf, error) {
 			return Leaf{}, corrupt(recordOffset, "record key length exceeds record")
 		}
 		keyEnd := count + int(keyLength)
-		entries[index] = LeafEntry{Key: bytes.Clone(record[count:keyEnd]), Value: bytes.Clone(record[keyEnd:])}
+		tombstone := flags&leafFlagTombstone != 0
+		if tombstone && keyEnd != len(record) {
+			return Leaf{}, corrupt(recordOffset, "tombstone record contains a value")
+		}
+		var value []byte
+		if !tombstone {
+			value = bytes.Clone(record[keyEnd:])
+		}
+		entries[index] = LeafEntry{Key: bytes.Clone(record[count:keyEnd]), Value: value, Tombstone: tombstone}
 		intervals[index] = interval{start: recordOffset, end: recordOffset + recordLength}
 	}
 	sort.Slice(intervals, func(left, right int) bool { return intervals[left].start < intervals[right].start })
@@ -211,5 +243,5 @@ func uvarintLength(value uint64) int {
 }
 
 func cloneLeafEntry(entry LeafEntry) LeafEntry {
-	return LeafEntry{Key: bytes.Clone(entry.Key), Value: bytes.Clone(entry.Value)}
+	return LeafEntry{Key: bytes.Clone(entry.Key), Value: bytes.Clone(entry.Value), Tombstone: entry.Tombstone}
 }

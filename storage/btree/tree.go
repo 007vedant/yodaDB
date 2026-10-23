@@ -194,6 +194,9 @@ func (c *Cursor) Next(ctx context.Context) ([]byte, []byte, error) {
 			}
 			c.lastKey = bytes.Clone(entry.Key)
 			c.hasLast = true
+			if entry.Tombstone {
+				continue
+			}
 			return bytes.Clone(entry.Key), bytes.Clone(entry.Value), nil
 		}
 

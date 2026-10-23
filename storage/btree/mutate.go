@@ -59,12 +59,19 @@ func insertIntoLeaf(ctx context.Context, appender PageAppender, generation uint6
 	position := sort.Search(len(leaf.Entries), func(index int) bool {
 		return bytes.Compare(leaf.Entries[index].Key, key) >= 0
 	})
-	if position < len(leaf.Entries) && bytes.Equal(leaf.Entries[position].Key, key) {
+	found := position < len(leaf.Entries) && bytes.Equal(leaf.Entries[position].Key, key)
+	if found && !leaf.Entries[position].Tombstone {
 		return LeafMutation{}, dberrors.New(dberrors.CodeConstraint, "btree.insert_leaf", "duplicate key")
 	}
 
-	builder := page.NewLeafBuilderFromDecoded(leaf)
-	if err := builder.Insert(position, key, value); err == nil {
+	var entries []page.LeafEntry
+	if found {
+		entries = replaceEntry(leaf.Entries, position, page.LeafEntry{Key: key, Value: value})
+	} else {
+		entries = insertEntry(leaf.Entries, position, page.LeafEntry{Key: key, Value: value})
+	}
+	builder, err := buildLeaf(entries, leaf.RightSibling)
+	if err == nil {
 		payload, err := builder.Encode()
 		if err != nil {
 			return LeafMutation{}, err
@@ -78,7 +85,6 @@ func insertIntoLeaf(ctx context.Context, appender PageAppender, generation uint6
 		return LeafMutation{}, err
 	}
 
-	entries := insertEntry(leaf.Entries, position, page.LeafEntry{Key: key, Value: value})
 	left, right, err := chooseLeafSplit(entries, leaf.RightSibling)
 	if err != nil {
 		return LeafMutation{}, err
@@ -139,8 +145,22 @@ func buildLeaf(entries []page.LeafEntry, rightSibling page.ID) (*page.LeafBuilde
 		if err := builder.Insert(builder.Count(), entry.Key, entry.Value); err != nil {
 			return nil, err
 		}
+		if entry.Tombstone {
+			if err := builder.Tombstone(builder.Count() - 1); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return builder, nil
+}
+
+func replaceEntry(entries []page.LeafEntry, position int, replacement page.LeafEntry) []page.LeafEntry {
+	result := make([]page.LeafEntry, len(entries))
+	for index, entry := range entries {
+		result[index] = cloneEntry(entry)
+	}
+	result[position] = cloneEntry(replacement)
+	return result
 }
 
 func insertEntry(entries []page.LeafEntry, position int, inserted page.LeafEntry) []page.LeafEntry {
@@ -156,7 +176,7 @@ func insertEntry(entries []page.LeafEntry, position int, inserted page.LeafEntry
 }
 
 func cloneEntry(entry page.LeafEntry) page.LeafEntry {
-	return page.LeafEntry{Key: bytes.Clone(entry.Key), Value: bytes.Clone(entry.Value)}
+	return page.LeafEntry{Key: bytes.Clone(entry.Key), Value: bytes.Clone(entry.Value), Tombstone: entry.Tombstone}
 }
 
 func appendLeaf(ctx context.Context, appender PageAppender, generation uint64, payload []byte) (page.ID, error) {

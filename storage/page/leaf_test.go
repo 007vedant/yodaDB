@@ -71,6 +71,42 @@ func TestLeafPayloadWrapsInCommonPage(t *testing.T) {
 	}
 }
 
+func TestLeafTombstoneRoundTripAndCanonicalLayout(t *testing.T) {
+	builder := page.NewLeafBuilder(0)
+	if err := builder.Insert(0, []byte("key"), []byte("discarded")); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Tombstone(0); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := builder.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags := binary.LittleEndian.Uint16(payload[20:22]); flags != 1 {
+		t.Fatalf("slot flags = %#x, want tombstone bit", flags)
+	}
+	recordOffset := int(binary.LittleEndian.Uint16(payload[16:18]))
+	if got := payload[recordOffset:]; string(got) != "\x03key" {
+		t.Fatalf("tombstone record = %x, want key without value", got)
+	}
+
+	leaf, err := page.DecodeLeaf(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaf.Entries) != 1 || !leaf.Entries[0].Tombstone || leaf.Entries[0].Value != nil {
+		t.Fatalf("decoded tombstone = %#v", leaf.Entries)
+	}
+	rebuilt, err := page.NewLeafBuilderFromDecoded(leaf).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rebuilt) != string(payload) {
+		t.Fatal("decode/rebuild did not preserve canonical tombstone bytes")
+	}
+}
+
 func TestLeafBuilderEnforcesCapacityAndBounds(t *testing.T) {
 	builder := page.NewLeafBuilder(0)
 	if err := builder.Insert(1, nil, nil); !errors.Is(err, dberrors.ErrConstraint) {
@@ -81,6 +117,27 @@ func TestLeafBuilderEnforcesCapacityAndBounds(t *testing.T) {
 	}
 	if err := builder.Delete(0); !errors.Is(err, dberrors.ErrConstraint) {
 		t.Fatalf("out-of-range delete error = %v, want constraint", err)
+	}
+	if err := builder.Tombstone(0); !errors.Is(err, dberrors.ErrConstraint) {
+		t.Fatalf("out-of-range tombstone error = %v, want constraint", err)
+	}
+}
+
+func TestDecodeLeafRejectsUnknownFlagsAndTombstoneValue(t *testing.T) {
+	builder := page.NewLeafBuilder(0)
+	if err := builder.Insert(0, []byte("key"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	valid, _ := builder.Encode()
+	unknown := append([]byte(nil), valid...)
+	binary.LittleEndian.PutUint16(unknown[20:22], 2)
+	if _, err := page.DecodeLeaf(unknown); !errors.Is(err, dberrors.ErrCorruption) {
+		t.Fatalf("unknown flag error = %v, want corruption", err)
+	}
+	withValue := append([]byte(nil), valid...)
+	binary.LittleEndian.PutUint16(withValue[20:22], 1)
+	if _, err := page.DecodeLeaf(withValue); !errors.Is(err, dberrors.ErrCorruption) {
+		t.Fatalf("tombstone value error = %v, want corruption", err)
 	}
 }
 

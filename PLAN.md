@@ -353,7 +353,9 @@ Tables and indexes are B+ trees:
 - a mutation copies the affected path, producing a new root;
 - splits propagate upward; root splitting creates a new root page;
 - deletion begins with tombstones/no merge, then later adds redistribution and
-  merge after insertion and recovery are stable.
+  merge after insertion and recovery are stable;
+- a tombstone retains its key for ordering and separator routing, stores no
+  value, and is omitted by lookup and cursor APIs.
 
 ```mermaid
 flowchart TB
@@ -864,7 +866,7 @@ Status: **in progress**
 | M3.2 | [x] verified | Read-only traversal/cursor | M2 | lookup, seek, range scan |
 | M3.3 | [x] verified | COW leaf insertion/split | M3.1,M3.2 | immutable leaf updates |
 | M3.4 | [x] verified | Internal insertion/root split | M3.3 | arbitrary-height insertion |
-| M3.5 | [ ] | Tombstone deletion | M3.4 | logical delete without merge |
+| M3.5 | [x] verified | Tombstone deletion | M3.4 | logical delete without merge |
 | M3.6 | [ ] | Model/property test suite | M3.2-M3.5 | randomized comparison to sorted model |
 | M3.7 | [ ] | Tree visualization | M3.4 | `pages --tree` diagnostic output |
 

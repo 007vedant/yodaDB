@@ -1,4 +1,3 @@
-// Package btree reads immutable B+ tree roots, provides lookup, seek, and range
-// cursors, and prepares copy-on-write leaf replacements. Parent/root mutation
-// is added incrementally during M3.
+// Package btree provides immutable-root lookup and cursors plus copy-on-write
+// insertion and tombstone deletion through arbitrary-height B+ trees.
 package btree
