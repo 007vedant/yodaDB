@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: all build fmt fmt-check vet test test-race check bench
+.PHONY: all build fmt fmt-check vet test test-race check model-test-extended bench
 
 all: check
 
@@ -28,6 +28,9 @@ test-race:
 	$(GO) test -race ./...
 
 check: fmt-check vet test test-race
+
+model-test-extended:
+	YODADB_EXTENDED_MODEL=1 $(GO) test ./storage/btree -run '^TestBTreeModelExtended$$' -count=1 -timeout=30m
 
 bench:
 	$(GO) test -run '^$$' -bench . -benchmem ./internal/bench

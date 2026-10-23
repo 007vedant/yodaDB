@@ -867,7 +867,7 @@ Status: **in progress**
 | M3.3 | [x] verified | COW leaf insertion/split | M3.1,M3.2 | immutable leaf updates |
 | M3.4 | [x] verified | Internal insertion/root split | M3.3 | arbitrary-height insertion |
 | M3.5 | [x] verified | Tombstone deletion | M3.4 | logical delete without merge |
-| M3.6 | [ ] | Model/property test suite | M3.2-M3.5 | randomized comparison to sorted model |
+| M3.6 | [x] verified | Model/property test suite | M3.2-M3.5 | randomized comparison to sorted model |
 | M3.7 | [ ] | Tree visualization | M3.4 | `pages --tree` diagnostic output |
 
 Gate:
