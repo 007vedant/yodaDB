@@ -9,9 +9,10 @@ authoritative source for architecture, invariants, task dependencies, and
 acceptance gates. [AGENTS.md](./AGENTS.md) contains the contribution rules that
 keep implementation work aligned with that plan.
 
-Status: **M1 in-memory relational vertical slice**. The lexer, parser, binder,
-strict scalar types, in-memory catalog, iterator executor, native API, and SQL
-shell are implemented. Persistence intentionally begins in a later milestone.
+Status: **M2 page-file and codec foundation**. The M1 in-memory SQL slice remains
+available, and low-level storage now includes a VFS, versioned tuple/page codecs,
+slotted leaves, an append pager, double-metapage bootstrap, and file inspection.
+SQL table persistence intentionally begins in M4.
 
 ## Requirements
 
@@ -51,7 +52,22 @@ Ada
 ```
 
 The database exists only in memory and disappears when the process exits.
-Opening a `.yoda` file is introduced with persistent storage in M4.
+Opening a `.yoda` file through the SQL API is introduced with persistent storage
+in M4.
+
+## Inspecting an M2 page file
+
+The CLI now uses Cobra for its command hierarchy. Given a low-level `.yoda` file
+created through the M2 storage API or tests, inspect validated metadata and page
+headers with:
+
+```sh
+go run ./cmd/yodadb inspect app.yoda
+```
+
+`inspect` does not execute SQL or modify the file. It reports the file identity,
+format and page sizes, selected metapage generation, transaction/manifest
+placeholders, page count, and each validated common page header.
 
 ## Repository layout
 

@@ -833,16 +833,18 @@ structured errors. No disk persistence is expected yet.
 
 Outcome: safely encode, persist, reopen, and inspect low-level structures.
 
-| ID | Task | Depends on | Deliverable |
-|---|---|---|---|
-| M2.1 | VFS abstraction and OS file | M0 | positional I/O, sync, lock hooks |
-| M2.2 | Tuple codec | M1.1 | versioned row encoding and fuzz tests |
-| M2.3 | Page format and checksum | M2.1 | header codec, corruption errors, fixtures |
-| M2.4 | Slotted leaf page | M2.2,M2.3 | insert/read/delete-in-builder operations |
-| M2.5 | Pager and bounded cache | M2.3 | page reads, append allocation, pin/release |
-| M2.6 | Metapage bootstrap | M2.3,M2.5 | create/open empty database |
-| M2.7 | Inspect CLI | M2.6 | Cobra command tree and header/page summaries without SQL engine |
-| M2.8 | Decoder fuzzing corpus | M2.2-M2.6 | malformed/truncated page regression corpus |
+Status: **[x] verified (2026-08-15)**
+
+| ID | Status | Task | Depends on | Deliverable |
+|---|---|---|---|---|
+| M2.1 | [x] verified | VFS abstraction and OS file | M0 | positional I/O, sync, lock hooks |
+| M2.2 | [x] verified | Tuple codec | M1.1 | versioned row encoding and fuzz tests |
+| M2.3 | [x] verified | Page format and checksum | M2.1 | header codec, corruption errors, fixtures |
+| M2.4 | [x] verified | Slotted leaf page | M2.2,M2.3 | insert/read/delete-in-builder operations |
+| M2.5 | [x] verified | Pager and bounded cache | M2.3 | page reads, append allocation, pin/release |
+| M2.6 | [x] verified | Metapage bootstrap | M2.3,M2.5 | create/open empty database |
+| M2.7 | [x] verified | Inspect CLI | M2.6 | Cobra command tree and header/page summaries without SQL engine |
+| M2.8 | [x] verified | Decoder fuzzing corpus | M2.2-M2.6 | malformed/truncated page regression corpus |
 
 Gate:
 
