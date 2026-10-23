@@ -4,13 +4,17 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"yodadb"
+	"yodadb/storage/manifest"
+	"yodadb/storage/page"
 )
 
 const version = "dev"
@@ -24,36 +28,77 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("yodadb", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: yodadb [options] [database]")
-		fmt.Fprintln(flags.Output(), "")
-		fmt.Fprintln(flags.Output(), "yodaDB is an embedded relational database under development.")
-		fmt.Fprintln(flags.Output(), "")
-		fmt.Fprintln(flags.Output(), "Options:")
-		flags.PrintDefaults()
-	}
-
-	showVersion := flags.Bool("version", false, "print version and exit")
-	if err := flags.Parse(args); err != nil {
-		if err == flag.ErrHelp {
-			return 0
-		}
+	command := newRootCommand(stdin, stdout, stderr)
+	command.SetArgs(args)
+	if err := command.Execute(); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 2
 	}
-	if *showVersion {
-		fmt.Fprintf(stdout, "yodadb %s\n", version)
-		return 0
-	}
-	if flags.NArg() > 0 {
-		fmt.Fprintln(stderr, "database files are not implemented until M4; run without a filename for the M1 in-memory shell")
-		return 2
-	}
-	return runShell(stdin, stdout, stderr)
+	return 0
 }
 
-func runShell(stdin io.Reader, stdout, stderr io.Writer) int {
+func newRootCommand(stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:           "yodadb",
+		Short:         "Embedded relational database and diagnostic tools",
+		Version:       version,
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		Args:          cobra.MaximumNArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return errors.New("database files are not implemented until M4; run without a filename for the in-memory shell")
+			}
+			if code := runShell(command.Context(), stdin, stdout, stderr); code != 0 {
+				return errors.New("in-memory shell failed")
+			}
+			return nil
+		},
+	}
+	command.SetIn(stdin)
+	command.SetOut(stdout)
+	command.SetErr(stderr)
+	command.SetVersionTemplate("yodadb {{.Version}}\n")
+	command.CompletionOptions.DisableDefaultCmd = true
+	command.AddCommand(newInspectCommand(stdout))
+	return command
+}
+
+func newInspectCommand(stdout io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "inspect DATABASE",
+		Short: "Display validated database and page headers",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			database, err := manifest.Open(command.Context(), args[0], manifest.Options{ReadOnly: true})
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+			metadata := database.Metadata()
+			fmt.Fprintf(stdout, "file: %s\n", database.Path())
+			fmt.Fprintf(stdout, "file ID: %s\n", metadata.FileID)
+			fmt.Fprintf(stdout, "format version: %d\n", page.FormatVersion)
+			fmt.Fprintf(stdout, "page size: %d\n", metadata.PageSize)
+			fmt.Fprintf(stdout, "active metapage: %d\n", metadata.ActiveSlot)
+			fmt.Fprintf(stdout, "generation: %d\n", metadata.Generation)
+			fmt.Fprintf(stdout, "latest transaction: %d\n", metadata.LatestTxnID)
+			fmt.Fprintf(stdout, "latest manifest page: %d\n", metadata.LatestManifestPageID)
+			fmt.Fprintf(stdout, "page count: %d\n", database.PageCount())
+			for id := page.ID(0); uint64(id) < database.PageCount(); id++ {
+				decoded, err := database.ReadPage(id)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(stdout, "page %d: type=%s generation=%d payload=%d checksum=%016x\n",
+					id, decoded.Header.Type, decoded.Header.Generation, len(decoded.Payload), decoded.Header.Checksum)
+			}
+			return nil
+		},
+	}
+}
+
+func runShell(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) int {
 	database := yodadb.New()
 	defer database.Close()
 	scanner := bufio.NewScanner(stdin)
@@ -66,7 +111,7 @@ func runShell(stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		if !scanner.Scan() {
 			if strings.TrimSpace(statement.String()) != "" {
-				executeShellStatement(database, statement.String(), stdout, stderr)
+				executeShellStatement(ctx, database, statement.String(), stdout, stderr)
 			}
 			if err := scanner.Err(); err != nil {
 				fmt.Fprintf(stderr, "input error: %v\n", err)
@@ -80,13 +125,13 @@ func runShell(stdin io.Reader, stdout, stderr io.Writer) int {
 		if !strings.HasSuffix(strings.TrimSpace(line), ";") {
 			continue
 		}
-		executeShellStatement(database, statement.String(), stdout, stderr)
+		executeShellStatement(ctx, database, statement.String(), stdout, stderr)
 		statement.Reset()
 	}
 }
 
-func executeShellStatement(database *yodadb.DB, sql string, stdout, stderr io.Writer) {
-	outcome, err := database.Execute(context.Background(), sql)
+func executeShellStatement(ctx context.Context, database *yodadb.DB, sql string, stdout, stderr io.Writer) {
+	outcome, err := database.Execute(ctx, sql)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return

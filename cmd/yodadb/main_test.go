@@ -2,8 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"yodadb/storage/manifest"
+	"yodadb/storage/page"
 )
 
 func TestRunHelp(t *testing.T) {
@@ -12,8 +17,34 @@ func TestRunHelp(t *testing.T) {
 	if code := run([]string{"--help"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("run --help returned %d, want 0", code)
 	}
-	if !strings.Contains(stderr.String(), "Usage: yodadb") {
-		t.Fatalf("help output %q does not contain usage", stderr.String())
+	if !strings.Contains(stdout.String(), "Usage:") || !strings.Contains(stdout.String(), "inspect") {
+		t.Fatalf("help output %q does not contain usage and inspect command", stdout.String())
+	}
+}
+
+func TestRunInspect(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inspect.yoda")
+	database, err := manifest.Create(context.Background(), path, manifest.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Append(page.TypeCatalog, 1, []byte("catalog fixture")); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"inspect", path}, &stdout, &stderr); code != 0 {
+		t.Fatalf("inspect returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, want := range []string{"format version: 1", "page size: 4096", "active metapage: 0", "page count: 3", "page 2: type=catalog"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("inspect output %q does not contain %q", stdout.String(), want)
+		}
 	}
 }
 
