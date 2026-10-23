@@ -858,7 +858,7 @@ Gate:
 
 Outcome: durable ordered key/value access with immutable committed pages.
 
-Status: **in progress**
+Status: **[x] verified (2026-10-23)**
 
 | ID | Status | Task | Depends on | Deliverable |
 |---|---|---|---|---|
@@ -868,7 +868,7 @@ Status: **in progress**
 | M3.4 | [x] verified | Internal insertion/root split | M3.3 | arbitrary-height insertion |
 | M3.5 | [x] verified | Tombstone deletion | M3.4 | logical delete without merge |
 | M3.6 | [x] verified | Model/property test suite | M3.2-M3.5 | randomized comparison to sorted model |
-| M3.7 | [ ] | Tree visualization | M3.4 | `pages --tree` diagnostic output |
+| M3.7 | [x] verified | Tree visualization | M3.4 | `pages --tree` diagnostic output |
 
 Gate:
 

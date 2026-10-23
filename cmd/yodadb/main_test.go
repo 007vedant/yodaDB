@@ -17,8 +17,71 @@ func TestRunHelp(t *testing.T) {
 	if code := run([]string{"--help"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("run --help returned %d, want 0", code)
 	}
-	if !strings.Contains(stdout.String(), "Usage:") || !strings.Contains(stdout.String(), "inspect") {
-		t.Fatalf("help output %q does not contain usage and inspect command", stdout.String())
+	if !strings.Contains(stdout.String(), "Usage:") || !strings.Contains(stdout.String(), "inspect") || !strings.Contains(stdout.String(), "pages") {
+		t.Fatalf("help output %q does not contain usage and diagnostic commands", stdout.String())
+	}
+}
+
+func TestRunPagesTree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tree.yoda")
+	database, err := manifest.Create(context.Background(), path, manifest.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	left := page.NewLeafBuilder(3)
+	_ = left.Insert(0, []byte("a"), []byte("one"))
+	leftPayload, _ := left.Encode()
+	if id, err := database.Append(page.TypeBTreeLeaf, 1, leftPayload); err != nil || id != 2 {
+		t.Fatalf("left page = %d, %v", id, err)
+	}
+	right := page.NewLeafBuilder(0)
+	_ = right.Insert(0, []byte("b"), []byte("two"))
+	rightPayload, _ := right.Encode()
+	if id, err := database.Append(page.TypeBTreeLeaf, 1, rightPayload); err != nil || id != 3 {
+		t.Fatalf("right page = %d, %v", id, err)
+	}
+	root := page.NewInternalBuilder(2)
+	_ = root.Insert(0, []byte("b"), 3)
+	rootPayload, _ := root.Encode()
+	if id, err := database.Append(page.TypeBTreeInternal, 2, rootPayload); err != nil || id != 4 {
+		t.Fatalf("root page = %d, %v", id, err)
+	}
+	if err := database.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"pages", path, "--tree", "4"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("pages returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	want := "tree root=4\n" +
+		"internal page=4 generation=2 separators=1\n" +
+		"├── child[0] range=(-inf,0x62)\n" +
+		"│   └── leaf page=2 generation=1 entries=1 live=1 tombstones=0 right=3 keys=0x61..0x61\n" +
+		"└── child[1] range=[0x62,+inf)\n" +
+		"    └── leaf page=3 generation=1 entries=1 live=1 tombstones=0 right=0 keys=0x62..0x62\n"
+	if stdout.String() != want {
+		t.Fatalf("pages output:\n%s\nwant:\n%s", stdout.String(), want)
+	}
+}
+
+func TestRunPagesTreeValidatesRootFlag(t *testing.T) {
+	for name, args := range map[string][]string{
+		"missing": {"pages", "database.yoda"},
+		"invalid": {"pages", "database.yoda", "--tree", "users"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code != 2 {
+				t.Fatalf("run returned %d, want 2", code)
+			}
+			if !strings.Contains(stderr.String(), "tree") {
+				t.Fatalf("stderr %q does not explain tree root error", stderr.String())
+			}
+		})
 	}
 }
 

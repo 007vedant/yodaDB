@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"yodadb"
+	"yodadb/storage/btree"
 	"yodadb/storage/manifest"
 	"yodadb/storage/page"
 )
@@ -61,6 +63,7 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
 	command.SetVersionTemplate("yodadb {{.Version}}\n")
 	command.CompletionOptions.DisableDefaultCmd = true
 	command.AddCommand(newInspectCommand(stdout))
+	command.AddCommand(newPagesCommand(stdout))
 	return command
 }
 
@@ -96,6 +99,36 @@ func newInspectCommand(stdout io.Writer) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newPagesCommand(stdout io.Writer) *cobra.Command {
+	var treeRoot string
+	command := &cobra.Command{
+		Use:   "pages DATABASE --tree ROOT_PAGE",
+		Short: "Display storage page structures",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			if treeRoot == "" {
+				return errors.New("--tree ROOT_PAGE is required")
+			}
+			root, err := strconv.ParseUint(treeRoot, 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid tree root %q: %w", treeRoot, err)
+			}
+			database, err := manifest.Open(command.Context(), args[0], manifest.Options{ReadOnly: true})
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+			tree, err := btree.Open(database, page.ID(root))
+			if err != nil {
+				return err
+			}
+			return tree.WriteTree(command.Context(), stdout)
+		},
+	}
+	command.Flags().StringVar(&treeRoot, "tree", "", "numeric B+ tree root page ID")
+	return command
 }
 
 func runShell(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) int {

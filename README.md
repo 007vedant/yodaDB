@@ -9,10 +9,10 @@ authoritative source for architecture, invariants, task dependencies, and
 acceptance gates. [AGENTS.md](./AGENTS.md) contains the contribution rules that
 keep implementation work aligned with that plan.
 
-Status: **M2 page-file and codec foundation**. The M1 in-memory SQL slice remains
-available, and low-level storage now includes a VFS, versioned tuple/page codecs,
-slotted leaves, an append pager, double-metapage bootstrap, and file inspection.
-SQL table persistence intentionally begins in M4.
+Status: **M3 copy-on-write B+ tree**. The M1 in-memory SQL slice remains
+available, and low-level storage now includes immutable ordered trees, snapshot
+roots, insertion, tombstone deletion, randomized model tests, and tree
+inspection. SQL table persistence intentionally begins in M4.
 
 ## Requirements
 
@@ -23,6 +23,7 @@ SQL table persistence intentionally begins in M4.
 
 ```sh
 make check
+make model-test-extended
 go run ./cmd/yodadb --help
 go run ./cmd/yodadb --version
 make bench
@@ -55,7 +56,7 @@ The database exists only in memory and disappears when the process exits.
 Opening a `.yoda` file through the SQL API is introduced with persistent storage
 in M4.
 
-## Inspecting an M2 page file
+## Inspecting a page file
 
 The CLI now uses Cobra for its command hierarchy. Given a low-level `.yoda` file
 created through the M2 storage API or tests, inspect validated metadata and page
@@ -68,6 +69,16 @@ go run ./cmd/yodadb inspect app.yoda
 `inspect` does not execute SQL or modify the file. It reports the file identity,
 format and page sizes, selected metapage generation, transaction/manifest
 placeholders, page count, and each validated common page header.
+
+To visualize a B+ tree whose root page ID is known:
+
+```sh
+go run ./cmd/yodadb pages app.yoda --tree 42
+```
+
+The output shows internal-page child ranges, leaf counts, tombstones, sibling
+references, and page generations. M4 will resolve table and index names through
+the persistent catalog; during M3 the root is supplied as a numeric page ID.
 
 ## Repository layout
 
