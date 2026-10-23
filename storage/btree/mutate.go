@@ -52,6 +52,10 @@ func (t *Tree) InsertLeaf(ctx context.Context, appender PageAppender, generation
 			return LeafMutation{}, err
 		}
 	}
+	return insertIntoLeaf(ctx, appender, generation, oldID, leaf, key, value)
+}
+
+func insertIntoLeaf(ctx context.Context, appender PageAppender, generation uint64, oldID page.ID, leaf page.Leaf, key, value []byte) (LeafMutation, error) {
 	position := sort.Search(len(leaf.Entries), func(index int) bool {
 		return bytes.Compare(leaf.Entries[index].Key, key) >= 0
 	})

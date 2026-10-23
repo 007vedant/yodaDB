@@ -116,17 +116,21 @@ func TestTraversalRejectsUnorderedLeafAndInternalCycle(t *testing.T) {
 	}
 }
 
-func TestCursorRejectsLeafSiblingCycle(t *testing.T) {
+func TestCursorUsesParentPathInsteadOfStaleLeafSiblings(t *testing.T) {
 	firstBuilder := page.NewLeafBuilder(3)
 	_ = firstBuilder.Insert(0, []byte("a"), []byte("one"))
 	firstPayload, _ := firstBuilder.Encode()
 	secondBuilder := page.NewLeafBuilder(2)
 	_ = secondBuilder.Insert(0, []byte("b"), []byte("two"))
 	secondPayload, _ := secondBuilder.Encode()
+	rootBuilder := page.NewInternalBuilder(2)
+	_ = rootBuilder.Insert(0, []byte("b"), 3)
+	rootPayload, _ := rootBuilder.Encode()
 	tree, _ := btree.Open(pageMap{
 		2: treePage(2, page.TypeBTreeLeaf, firstPayload),
 		3: treePage(3, page.TypeBTreeLeaf, secondPayload),
-	}, 2)
+		4: treePage(4, page.TypeBTreeInternal, rootPayload),
+	}, 4)
 	cursor, err := tree.Seek(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -136,8 +140,8 @@ func TestCursorRejectsLeafSiblingCycle(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, _, err := cursor.Next(context.Background()); !errors.Is(err, dberrors.ErrCorruption) {
-		t.Fatalf("sibling cycle error = %v, want corruption", err)
+	if _, _, err := cursor.Next(context.Background()); err != io.EOF {
+		t.Fatalf("terminal cursor error = %v, want EOF", err)
 	}
 }
 

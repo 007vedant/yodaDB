@@ -51,6 +51,10 @@ func NewInternalBuilderFromDecoded(internal Internal) *InternalBuilder {
 // Count returns the number of separator slots.
 func (b *InternalBuilder) Count() int { return len(b.entries) }
 
+// UsedBytes returns the encoded header, slots, and separator bytes before the
+// payload's zero-filled free space. It is useful for choosing balanced splits.
+func (b *InternalBuilder) UsedBytes() int { return b.encodedSize() }
+
 // FirstChild returns the leftmost child page ID.
 func (b *InternalBuilder) FirstChild() ID { return b.firstChild }
 
