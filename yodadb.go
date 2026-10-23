@@ -10,6 +10,9 @@ import (
 // DB is an embedded database handle.
 type DB = db.DB
 
+// Tx is an explicit single-writer transaction handle.
+type Tx = db.Tx
+
 // Result describes a successfully executed non-query statement.
 type Result = db.Result
 

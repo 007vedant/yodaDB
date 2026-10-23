@@ -169,3 +169,13 @@ func TestBindM4Statements(t *testing.T) {
 		t.Fatal("EXPLAIN SELECT table was not bound")
 	}
 }
+
+func TestBindTransactionControl(t *testing.T) {
+	bound, err := parseAndBind(t, catalog.New(), "ROLLBACK")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bound.(*binder.TransactionControl).Action; got != parser.RollbackTransaction {
+		t.Fatalf("action=%v", got)
+	}
+}

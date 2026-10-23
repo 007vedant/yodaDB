@@ -71,12 +71,26 @@ func (p *parser) parseStatement() (Statement, error) {
 		return p.parseDelete()
 	case lexer.Explain:
 		return p.parseExplain()
+	case lexer.Begin, lexer.Commit, lexer.Rollback:
+		return p.parseTransaction()
 	case lexer.Drop, lexer.Alter:
 		found := p.advance()
 		return nil, &Error{Span: found.Span, Expected: "a supported SQL statement", Found: found, Category: dberrors.CodeUnsupported}
 	default:
-		return nil, p.expected("CREATE, INSERT, SELECT, UPDATE, DELETE, or EXPLAIN")
+		return nil, p.expected("CREATE, INSERT, SELECT, UPDATE, DELETE, EXPLAIN, BEGIN, COMMIT, or ROLLBACK")
 	}
+}
+
+func (p *parser) parseTransaction() (Statement, error) {
+	token := p.advance()
+	action := BeginTransaction
+	switch token.Kind {
+	case lexer.Commit:
+		action = CommitTransaction
+	case lexer.Rollback:
+		action = RollbackTransaction
+	}
+	return &TransactionStatement{Span: token.Span, Action: action}, nil
 }
 
 func (p *parser) parseCreate() (Statement, error) {

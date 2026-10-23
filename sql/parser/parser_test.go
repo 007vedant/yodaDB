@@ -60,7 +60,7 @@ func TestParseDiagnosticsGolden(t *testing.T) {
 		source string
 		want   string
 	}{
-		{"", "line 1, column 1: expected CREATE, INSERT, SELECT, UPDATE, DELETE, or EXPLAIN, found end of input"},
+		{"", "line 1, column 1: expected CREATE, INSERT, SELECT, UPDATE, DELETE, EXPLAIN, BEGIN, COMMIT, or ROLLBACK, found end of input"},
 		{"CREATE users", `line 1, column 8: expected TABLE or [UNIQUE] INDEX, found identifier "users"`},
 		{"SELECT FROM users", `line 1, column 8: expected expression, found FROM "FROM"`},
 		{"INSERT INTO users VALUES (1,)", `line 1, column 29: expected expression, found ) ")"`},
@@ -105,6 +105,22 @@ func TestParseM4Statements(t *testing.T) {
 		}
 		if !test.check(statement) || parser.ParameterCount(statement) != test.parameters {
 			t.Fatalf("Parse(%q) = %#v, parameters=%d", test.sql, statement, parser.ParameterCount(statement))
+		}
+	}
+}
+
+func TestParseTransactionControl(t *testing.T) {
+	for source, action := range map[string]parser.TransactionAction{
+		"BEGIN":    parser.BeginTransaction,
+		"COMMIT;":  parser.CommitTransaction,
+		"ROLLBACK": parser.RollbackTransaction,
+	} {
+		statement, err := parser.Parse(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := statement.(*parser.TransactionStatement).Action; got != action {
+			t.Fatalf("Parse(%q) action=%v, want %v", source, got, action)
 		}
 	}
 }

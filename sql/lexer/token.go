@@ -67,6 +67,9 @@ const (
 	On
 	Set
 	Explain
+	Begin
+	Commit
+	Rollback
 )
 
 var kindNames = [...]string{
@@ -117,6 +120,9 @@ var kindNames = [...]string{
 	On:               "ON",
 	Set:              "SET",
 	Explain:          "EXPLAIN",
+	Begin:            "BEGIN",
+	Commit:           "COMMIT",
+	Rollback:         "ROLLBACK",
 }
 
 // String returns a diagnostic token name.

@@ -13,6 +13,26 @@ type Statement interface {
 	statementNode()
 }
 
+// TransactionAction identifies a transaction-control statement.
+type TransactionAction uint8
+
+const (
+	BeginTransaction TransactionAction = iota
+	CommitTransaction
+	RollbackTransaction
+)
+
+// TransactionStatement begins or finishes an explicit transaction.
+type TransactionStatement struct {
+	Span   lexer.Span
+	Action TransactionAction
+}
+
+func (*TransactionStatement) statementNode() {}
+
+// SourceSpan returns the complete statement span.
+func (s *TransactionStatement) SourceSpan() lexer.Span { return s.Span }
+
 // Identifier retains source spelling and whether it was quoted.
 type Identifier struct {
 	Name   string

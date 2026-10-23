@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -17,11 +18,12 @@ import (
 	"yodadb/storage/manifest"
 	"yodadb/storage/page"
 	"yodadb/storage/table"
+	"yodadb/txn"
 	"yodadb/types"
 )
 
-// DB is a yodaDB handle backed either by M1 in-memory execution or an M4 page
-// file opened through Create or Open.
+// DB is a yodaDB handle backed either by in-memory execution or a persistent
+// page file opened through Create or Open.
 type DB struct {
 	mu       sync.RWMutex
 	closed   bool
@@ -29,6 +31,9 @@ type DB struct {
 	engine   *sqlexec.Engine
 	storage  *manifest.Database
 	manifest manifest.Manifest
+	writeTxn *txn.Write
+	txOwner  uint64
+	nextTxID uint64
 }
 
 // New creates an empty in-memory database.
@@ -100,22 +105,36 @@ type Outcome struct {
 func (db *DB) Execute(ctx context.Context, sql string, arguments ...any) (Outcome, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	return db.executeSQLLocked(ctx, 0, sql, arguments)
+}
+
+func (db *DB) executeSQLLocked(ctx context.Context, owner uint64, sql string, arguments []any) (Outcome, error) {
 	if db.closed {
 		return Outcome{}, dberrors.New(dberrors.CodeTransactionClosed, "db.execute", "database is closed")
+	}
+	if err := db.checkOwner(owner); err != nil {
+		return Outcome{}, err
 	}
 	statement, err := db.prepare(sql, arguments)
 	if err != nil {
 		return Outcome{}, err
 	}
-	return db.executeBound(ctx, statement)
+	return db.executeBound(ctx, owner, statement)
 }
 
 // Exec executes a supported statement that does not return rows.
 func (db *DB) Exec(ctx context.Context, sql string, arguments ...any) (Result, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	return db.execSQLLocked(ctx, 0, sql, arguments)
+}
+
+func (db *DB) execSQLLocked(ctx context.Context, owner uint64, sql string, arguments []any) (Result, error) {
 	if db.closed {
 		return Result{}, dberrors.New(dberrors.CodeTransactionClosed, "db.exec", "database is closed")
+	}
+	if err := db.checkOwner(owner); err != nil {
+		return Result{}, err
 	}
 	statement, err := db.prepare(sql, arguments)
 	if err != nil {
@@ -124,7 +143,7 @@ func (db *DB) Exec(ctx context.Context, sql string, arguments ...any) (Result, e
 	if isQuery(statement) {
 		return Result{}, dberrors.New(dberrors.CodeUnsupported, "db.exec", "SELECT returns rows; use Query")
 	}
-	outcome, err := db.executeBound(ctx, statement)
+	outcome, err := db.executeBound(ctx, owner, statement)
 	return outcome.Result, err
 }
 
@@ -132,8 +151,15 @@ func (db *DB) Exec(ctx context.Context, sql string, arguments ...any) (Result, e
 func (db *DB) Query(ctx context.Context, sql string, arguments ...any) (*Rows, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	return db.querySQLLocked(ctx, 0, sql, arguments)
+}
+
+func (db *DB) querySQLLocked(ctx context.Context, owner uint64, sql string, arguments []any) (*Rows, error) {
 	if db.closed {
 		return nil, dberrors.New(dberrors.CodeTransactionClosed, "db.query", "database is closed")
+	}
+	if err := db.checkOwner(owner); err != nil {
+		return nil, err
 	}
 	statement, err := db.prepare(sql, arguments)
 	if err != nil {
@@ -142,14 +168,20 @@ func (db *DB) Query(ctx context.Context, sql string, arguments ...any) (*Rows, e
 	if !isQuery(statement) {
 		return nil, dberrors.New(dberrors.CodeUnsupported, "db.query", "statement does not return rows; use Exec")
 	}
-	outcome, err := db.executeBound(ctx, statement)
+	outcome, err := db.executeBound(ctx, owner, statement)
 	return outcome.Rows, err
 }
 
-// Close releases the in-memory handle. It is idempotent.
+// Close rolls back any active transaction and releases the database handle. It
+// is idempotent.
 func (db *DB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	if db.writeTxn != nil {
+		_ = db.writeTxn.Rollback()
+		db.writeTxn = nil
+		db.txOwner = 0
+	}
 	db.closed = true
 	if db.storage != nil {
 		return db.storage.Close()
@@ -172,7 +204,10 @@ func (db *DB) prepare(sql string, arguments []any) (binder.Statement, error) {
 	return binder.Bind(parsed, db.catalog, parameters)
 }
 
-func (db *DB) executeBound(ctx context.Context, statement binder.Statement) (Outcome, error) {
+func (db *DB) executeBound(ctx context.Context, owner uint64, statement binder.Statement) (Outcome, error) {
+	if control, ok := statement.(*binder.TransactionControl); ok {
+		return db.executeTransactionControl(ctx, owner, control)
+	}
 	if db.storage != nil {
 		return db.executePersistent(ctx, statement)
 	}
@@ -189,8 +224,14 @@ func (db *DB) executeBound(ctx context.Context, statement binder.Statement) (Out
 func (db *DB) executePersistent(ctx context.Context, statement binder.Statement) (Outcome, error) {
 	switch statement := statement.(type) {
 	case *binder.CreateTable:
+		if db.writeTxn != nil {
+			return Outcome{}, transactionalDDLError()
+		}
 		return db.createPersistentTable(ctx, statement)
 	case *binder.CreateIndex:
+		if db.writeTxn != nil {
+			return Outcome{}, transactionalDDLError()
+		}
 		return db.createPersistentIndex(ctx, statement)
 	case *binder.Insert:
 		return db.insertPersistent(ctx, statement)
@@ -218,7 +259,8 @@ func (db *DB) createPersistentIndex(ctx context.Context, statement *binder.Creat
 	if err != nil {
 		return Outcome{}, err
 	}
-	tableTree, err := db.openTable(statement.Table, db.manifest.TableRoots[uint64(statement.Table.ID)])
+	current := db.currentManifest()
+	tableTree, err := db.openTable(statement.Table, current.TableRoots[uint64(statement.Table.ID)])
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -226,7 +268,7 @@ func (db *DB) createPersistentIndex(ctx context.Context, statement *binder.Creat
 	if err != nil {
 		return Outcome{}, err
 	}
-	txnID := db.manifest.TxnID + 1
+	txnID := current.TxnID + 1
 	indexRoot := page.ID(0)
 	for _, record := range records {
 		indexTree, err := storageindex.Open(db.storage, indexRoot, definition)
@@ -284,13 +326,18 @@ func (db *DB) insertPersistent(ctx context.Context, statement *binder.Insert) (O
 		}
 		row[index] = value
 	}
-	txnID := db.manifest.TxnID + 1
-	root := db.manifest.TableRoots[uint64(statement.Table.ID)]
+	current := db.currentManifest()
+	txnID := db.currentTxnID()
+	root := current.TableRoots[uint64(statement.Table.ID)]
 	tableTree, err := table.Open(db.storage, root, statement.Table.SchemaVersion, statement.Table.PrimaryKeyIndex, len(statement.Table.Columns))
 	if err != nil {
 		return Outcome{}, err
 	}
-	newRoot, tableKey, err := tableTree.Insert(ctx, db.storage, txnID, txnID, row)
+	hiddenID, err := db.nextHiddenRowID(ctx, statement.Table, tableTree)
+	if err != nil {
+		return Outcome{}, err
+	}
+	newRoot, tableKey, err := tableTree.Insert(ctx, db.storage, txnID, hiddenID, row)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -311,14 +358,15 @@ func (db *DB) insertPersistent(ctx context.Context, statement *binder.Insert) (O
 		}
 		next.IndexRoots[uint64(descriptor.ID)] = root
 	}
-	if err := db.publish(ctx, next); err != nil {
+	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
 	return Outcome{Result: Result{rowsAffected: 1}}, nil
 }
 
 func (db *DB) selectPersistent(ctx context.Context, statement *binder.Select) (Outcome, error) {
-	tableTree, err := db.openTable(statement.Table, db.manifest.TableRoots[uint64(statement.Table.ID)])
+	current := db.currentManifest()
+	tableTree, err := db.openTable(statement.Table, current.TableRoots[uint64(statement.Table.ID)])
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -355,7 +403,8 @@ func (db *DB) selectPersistent(ctx context.Context, statement *binder.Select) (O
 }
 
 func (db *DB) updatePersistent(ctx context.Context, statement *binder.Update) (Outcome, error) {
-	tableRoot := db.manifest.TableRoots[uint64(statement.Table.ID)]
+	current := db.currentManifest()
+	tableRoot := current.TableRoots[uint64(statement.Table.ID)]
 	tableTree, err := db.openTable(statement.Table, tableRoot)
 	if err != nil {
 		return Outcome{}, err
@@ -364,7 +413,7 @@ func (db *DB) updatePersistent(ctx context.Context, statement *binder.Update) (O
 	if err != nil {
 		return Outcome{}, err
 	}
-	txnID := db.manifest.TxnID + 1
+	txnID := db.currentTxnID()
 	next := db.nextManifest(txnID)
 	var affected int64
 	for _, record := range records {
@@ -418,14 +467,15 @@ func (db *DB) updatePersistent(ctx context.Context, statement *binder.Update) (O
 		return Outcome{Result: Result{}}, nil
 	}
 	next.TableRoots[uint64(statement.Table.ID)] = tableRoot
-	if err := db.publish(ctx, next); err != nil {
+	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
 	return Outcome{Result: Result{rowsAffected: affected}}, nil
 }
 
 func (db *DB) deletePersistent(ctx context.Context, statement *binder.Delete) (Outcome, error) {
-	tableRoot := db.manifest.TableRoots[uint64(statement.Table.ID)]
+	current := db.currentManifest()
+	tableRoot := current.TableRoots[uint64(statement.Table.ID)]
 	tableTree, err := db.openTable(statement.Table, tableRoot)
 	if err != nil {
 		return Outcome{}, err
@@ -434,7 +484,7 @@ func (db *DB) deletePersistent(ctx context.Context, statement *binder.Delete) (O
 	if err != nil {
 		return Outcome{}, err
 	}
-	txnID := db.manifest.TxnID + 1
+	txnID := db.currentTxnID()
 	next := db.nextManifest(txnID)
 	var affected int64
 	for _, record := range records {
@@ -466,7 +516,7 @@ func (db *DB) deletePersistent(ctx context.Context, statement *binder.Delete) (O
 		return Outcome{Result: Result{}}, nil
 	}
 	next.TableRoots[uint64(statement.Table.ID)] = tableRoot
-	if err := db.publish(ctx, next); err != nil {
+	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
 	return Outcome{Result: Result{rowsAffected: affected}}, nil
@@ -497,7 +547,8 @@ func (db *DB) selectRecords(ctx context.Context, statement *binder.Select, table
 		if err != nil {
 			return nil, err
 		}
-		indexTree, err := storageindex.Open(db.storage, db.manifest.IndexRoots[uint64(access.Index.ID)], definition)
+		current := db.currentManifest()
+		indexTree, err := storageindex.Open(db.storage, current.IndexRoots[uint64(access.Index.ID)], definition)
 		if err != nil {
 			return nil, err
 		}
@@ -536,10 +587,61 @@ func (db *DB) openTable(descriptor catalog.Table, root page.ID) (*table.Tree, er
 }
 
 func (db *DB) nextManifest(txnID uint64) manifest.Manifest {
-	next := cloneManifest(db.manifest)
-	next.TxnID, next.ParentTxnID = txnID, db.manifest.TxnID
+	current := db.currentManifest()
+	next := cloneManifest(current)
+	next.TxnID = txnID
+	next.ParentTxnID = db.manifest.TxnID
 	next.CommitUnixNano = time.Now().UnixNano()
 	return next
+}
+
+func (db *DB) currentManifest() manifest.Manifest {
+	if db.writeTxn == nil {
+		return cloneManifest(db.manifest)
+	}
+	record, err := db.writeTxn.Working()
+	if err != nil {
+		return cloneManifest(db.manifest)
+	}
+	return record
+}
+
+func (db *DB) currentTxnID() uint64 {
+	if db.writeTxn != nil {
+		return db.writeTxn.TxnID()
+	}
+	return db.manifest.TxnID + 1
+}
+
+func (db *DB) finishMutation(ctx context.Context, next manifest.Manifest) error {
+	if db.writeTxn != nil {
+		return db.writeTxn.Advance(next)
+	}
+	return db.publish(ctx, next)
+}
+
+func (db *DB) nextHiddenRowID(ctx context.Context, descriptor catalog.Table, tree *table.Tree) (uint64, error) {
+	if descriptor.PrimaryKeyIndex >= 0 {
+		return db.currentTxnID(), nil
+	}
+	records, err := tree.Scan(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var maximum uint64
+	for _, record := range records {
+		value, err := hiddenRowID(descriptor, record.Key)
+		if err != nil {
+			return 0, err
+		}
+		if value > maximum {
+			maximum = value
+		}
+	}
+	if maximum >= math.MaxInt64 {
+		return 0, dberrors.New(dberrors.CodeResourceLimit, "db.hidden_rowid", "hidden RowID space is exhausted")
+	}
+	return maximum + 1, nil
 }
 
 func (db *DB) insertIndexEntry(ctx context.Context, txnID uint64, tableDescriptor catalog.Table, descriptor catalog.Index, root page.ID, row types.Row, key []byte) (page.ID, error) {

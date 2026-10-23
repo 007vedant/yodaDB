@@ -1,2 +1,2 @@
-// Package txn will coordinate snapshots, validation, and commits.
+// Package txn coordinates transaction lifecycle and private root sets.
 package txn

@@ -21,6 +21,13 @@ type Statement interface {
 	boundStatement()
 }
 
+// TransactionControl is a bound BEGIN, COMMIT, or ROLLBACK statement.
+type TransactionControl struct {
+	Action parser.TransactionAction
+}
+
+func (*TransactionControl) boundStatement() {}
+
 // CreateTable is a validated table definition ready for catalog publication.
 type CreateTable struct {
 	Name    string
@@ -166,6 +173,8 @@ func Bind(statement parser.Statement, schema Catalog, parameters []types.Value) 
 			return nil, err
 		}
 		return &Explain{Select: selected.(*Select)}, nil
+	case *parser.TransactionStatement:
+		return &TransactionControl{Action: statement.Action}, nil
 	default:
 		return nil, &Error{Span: statement.SourceSpan(), Category: dberrors.CodeUnsupported, Message: fmt.Sprintf("unsupported statement %T", statement)}
 	}

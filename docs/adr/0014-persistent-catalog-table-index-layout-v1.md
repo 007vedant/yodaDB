@@ -41,8 +41,9 @@ Changing any descriptor field order, object-kind value, table-key rule, or
 secondary-index suffix rule requires a new format version and migration plan.
 
 The transaction-derived hidden RowID is sufficient while M4 publishes each
-INSERT separately. Multi-row writes introduced later must allocate distinct
-RowIDs within a transaction without changing the encoded key type.
+INSERT separately. Starting in M5.1, ADR 0015 allocates from the largest hidden
+RowID visible in the transaction so multi-row writes remain distinct without
+changing the encoded key type.
 
 ## Alternatives considered
 

@@ -47,7 +47,8 @@ go run ./cmd/yodadb app.yoda
 ```
 
 The SQL slice supports `CREATE TABLE`, `CREATE [UNIQUE] INDEX`, single-row
-`INSERT`, `SELECT`, `UPDATE`, `DELETE`, and `EXPLAIN SELECT`:
+`INSERT`, `SELECT`, `UPDATE`, `DELETE`, `EXPLAIN SELECT`, and explicit
+`BEGIN`/`COMMIT`/`ROLLBACK` transactions:
 
 ```text
 yoda> CREATE TABLE users (id INT64 PRIMARY KEY, name TEXT NOT NULL);
@@ -59,6 +60,22 @@ Ada
 
 Without a filename the database disappears when the process exits. With a
 filename, committed statements are available after restarting the process.
+
+The native API also exposes a transaction handle:
+
+```go
+tx, err := database.Begin(ctx)
+if err != nil { /* handle */ }
+_, err = tx.Exec(ctx, "INSERT INTO users VALUES (?, ?)", int64(2), "Grace")
+if err != nil {
+    _ = tx.Rollback()
+} else {
+    err = tx.Commit(ctx)
+}
+```
+
+M5.1 permits one active writer per database handle. Its queries read its own
+writes, and rollback publishes no roots. Transactional DDL is deferred to M5.7.
 
 ## Inspecting a page file
 
