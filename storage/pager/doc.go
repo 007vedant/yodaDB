@@ -1,2 +1,3 @@
-// Package pager will own page reads, append allocation, and caching.
+// Package pager owns validated page reads, append-only allocation, and bounded
+// pin-aware caching.
 package pager
