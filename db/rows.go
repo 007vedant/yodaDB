@@ -8,7 +8,7 @@ import (
 	"yodadb/types"
 )
 
-// Rows is a materialized M1 query result cursor.
+// Rows is a materialized query result cursor.
 type Rows struct {
 	columns []string
 	rows    []types.Row

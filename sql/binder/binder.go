@@ -13,6 +13,7 @@ import (
 // Catalog is the read boundary the binder needs from the schema catalog.
 type Catalog interface {
 	LookupTable(name string) (catalog.Table, bool)
+	LookupIndex(tableID catalog.TableID, name string) (catalog.Index, bool)
 }
 
 // Statement is a fully name-resolved and typed statement.
@@ -25,6 +26,16 @@ type CreateTable struct {
 	Name    string
 	Columns []catalog.ColumnSpec
 }
+
+// CreateIndex is a validated secondary-index definition.
+type CreateIndex struct {
+	Name      string
+	Table     catalog.Table
+	ColumnIDs []catalog.ColumnID
+	Unique    bool
+}
+
+func (*CreateIndex) boundStatement() {}
 
 func (*CreateTable) boundStatement() {}
 
@@ -42,6 +53,36 @@ type Select struct {
 	Projections []Projection
 	Where       *Expression
 }
+
+// Assignment is one resolved UPDATE target and value expression.
+type Assignment struct {
+	ColumnIndex int
+	Value       *Expression
+}
+
+// Update is a bound single-table UPDATE.
+type Update struct {
+	Table       catalog.Table
+	Assignments []Assignment
+	Where       *Expression
+}
+
+func (*Update) boundStatement() {}
+
+// Delete is a bound single-table DELETE.
+type Delete struct {
+	Table catalog.Table
+	Where *Expression
+}
+
+func (*Delete) boundStatement() {}
+
+// Explain is a bound SELECT whose deterministic physical plan is requested.
+type Explain struct {
+	Select *Select
+}
+
+func (*Explain) boundStatement() {}
 
 func (*Select) boundStatement() {}
 
@@ -109,13 +150,51 @@ func Bind(statement parser.Statement, schema Catalog, parameters []types.Value) 
 	switch statement := statement.(type) {
 	case *parser.CreateTableStatement:
 		return b.bindCreateTable(statement)
+	case *parser.CreateIndexStatement:
+		return b.bindCreateIndex(statement)
 	case *parser.InsertStatement:
 		return b.bindInsert(statement)
 	case *parser.SelectStatement:
 		return b.bindSelect(statement)
+	case *parser.UpdateStatement:
+		return b.bindUpdate(statement)
+	case *parser.DeleteStatement:
+		return b.bindDelete(statement)
+	case *parser.ExplainStatement:
+		selected, err := b.bindSelect(statement.Select)
+		if err != nil {
+			return nil, err
+		}
+		return &Explain{Select: selected.(*Select)}, nil
 	default:
 		return nil, &Error{Span: statement.SourceSpan(), Category: dberrors.CodeUnsupported, Message: fmt.Sprintf("unsupported statement %T", statement)}
 	}
+}
+
+func (b *binder) bindCreateIndex(statement *parser.CreateIndexStatement) (Statement, error) {
+	table, ok := b.catalog.LookupTable(statement.Table.Canonical())
+	if !ok {
+		return nil, bindError(statement.Table.Span, dberrors.CodeBind, fmt.Sprintf("unknown table %q", statement.Table.Name))
+	}
+	name := statement.Name.Canonical()
+	if _, exists := b.catalog.LookupIndex(table.ID, name); exists {
+		return nil, bindError(statement.Name.Span, dberrors.CodeConstraint, fmt.Sprintf("index %q already exists", name))
+	}
+	columns := make([]catalog.ColumnID, len(statement.Columns))
+	seen := make(map[catalog.ColumnID]struct{}, len(columns))
+	for index, identifier := range statement.Columns {
+		columnIndex := tableColumn(table, identifier.Canonical())
+		if columnIndex < 0 {
+			return nil, bindError(identifier.Span, dberrors.CodeBind, fmt.Sprintf("unknown column %q", identifier.Name))
+		}
+		columnID := table.Columns[columnIndex].ID
+		if _, duplicate := seen[columnID]; duplicate {
+			return nil, bindError(identifier.Span, dberrors.CodeConstraint, fmt.Sprintf("column %q appears more than once", identifier.Name))
+		}
+		seen[columnID] = struct{}{}
+		columns[index] = columnID
+	}
+	return &CreateIndex{Name: name, Table: table, ColumnIDs: columns, Unique: statement.Unique}, nil
 }
 
 type binder struct {
@@ -235,6 +314,87 @@ func (b *binder) bindSelect(statement *parser.SelectStatement) (Statement, error
 		}
 	}
 	return &Select{Table: table, Projections: projections, Where: where}, nil
+}
+
+func (b *binder) bindUpdate(statement *parser.UpdateStatement) (Statement, error) {
+	table, ok := b.catalog.LookupTable(statement.Table.Canonical())
+	if !ok {
+		return nil, bindError(statement.Table.Span, dberrors.CodeBind, fmt.Sprintf("unknown table %q", statement.Table.Name))
+	}
+	assignments := make([]Assignment, len(statement.Assignments))
+	seen := make(map[int]struct{}, len(assignments))
+	for index, parsed := range statement.Assignments {
+		ordinal := tableColumn(table, parsed.Column.Canonical())
+		if ordinal < 0 {
+			return nil, bindError(parsed.Column.Span, dberrors.CodeBind, fmt.Sprintf("unknown column %q", parsed.Column.Name))
+		}
+		if _, duplicate := seen[ordinal]; duplicate {
+			return nil, bindError(parsed.Column.Span, dberrors.CodeConstraint, fmt.Sprintf("column %q assigned more than once", parsed.Column.Name))
+		}
+		seen[ordinal] = struct{}{}
+		value, err := b.bindExpression(parsed.Value, &table)
+		if err != nil {
+			return nil, err
+		}
+		column := table.Columns[ordinal]
+		if value.Type != column.Type && value.Type != types.NullKind {
+			if value.Kind != LiteralExpression {
+				return nil, bindError(parsed.Value.SourceSpan(), dberrors.CodeType, fmt.Sprintf("column %q expects %s", column.Name, column.Type))
+			}
+			coerced, err := types.CoerceLossless(value.Value, column.Type)
+			if err != nil {
+				return nil, bindError(parsed.Value.SourceSpan(), dberrors.CodeType, fmt.Sprintf("column %q expects %s", column.Name, column.Type))
+			}
+			value.Value, value.Type = coerced, column.Type
+		}
+		if value.Type == types.NullKind && column.NotNull {
+			return nil, bindError(parsed.Value.SourceSpan(), dberrors.CodeConstraint, fmt.Sprintf("column %q cannot be NULL", column.Name))
+		}
+		assignments[index] = Assignment{ColumnIndex: ordinal, Value: value}
+	}
+	where, err := b.bindWhere(statement.Where, table)
+	if err != nil {
+		return nil, err
+	}
+	return &Update{Table: table, Assignments: assignments, Where: where}, nil
+}
+
+func (b *binder) bindDelete(statement *parser.DeleteStatement) (Statement, error) {
+	table, ok := b.catalog.LookupTable(statement.Table.Canonical())
+	if !ok {
+		return nil, bindError(statement.Table.Span, dberrors.CodeBind, fmt.Sprintf("unknown table %q", statement.Table.Name))
+	}
+	where, err := b.bindWhere(statement.Where, table)
+	if err != nil {
+		return nil, err
+	}
+	return &Delete{Table: table, Where: where}, nil
+}
+
+func (b *binder) bindWhere(parsed parser.Expression, table catalog.Table) (*Expression, error) {
+	if parsed == nil {
+		return nil, nil
+	}
+	where, err := b.bindExpression(parsed, &table)
+	if err != nil {
+		return nil, err
+	}
+	if where.Type == types.NullKind && where.Kind == LiteralExpression {
+		where.Type = types.BoolKind
+	}
+	if where.Type != types.BoolKind {
+		return nil, bindError(parsed.SourceSpan(), dberrors.CodeType, fmt.Sprintf("WHERE expression must be BOOL, got %s", where.Type))
+	}
+	return where, nil
+}
+
+func tableColumn(table catalog.Table, name string) int {
+	for index, column := range table.Columns {
+		if column.Name == name {
+			return index
+		}
+	}
+	return -1
 }
 
 func (b *binder) bindExpression(expression parser.Expression, table *catalog.Table) (*Expression, error) {

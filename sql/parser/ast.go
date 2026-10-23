@@ -40,6 +40,20 @@ type CreateTableStatement struct {
 	Columns []ColumnDefinition
 }
 
+// CreateIndexStatement defines one secondary index.
+type CreateIndexStatement struct {
+	Span    lexer.Span
+	Name    Identifier
+	Table   Identifier
+	Columns []Identifier
+	Unique  bool
+}
+
+func (*CreateIndexStatement) statementNode() {}
+
+// SourceSpan returns the complete statement span.
+func (s *CreateIndexStatement) SourceSpan() lexer.Span { return s.Span }
+
 func (*CreateTableStatement) statementNode() {}
 
 // SourceSpan returns the complete statement span.
@@ -73,6 +87,49 @@ type SelectStatement struct {
 	Projections []SelectItem
 	Where       Expression
 }
+
+// Assignment replaces one UPDATE target column.
+type Assignment struct {
+	Span   lexer.Span
+	Column Identifier
+	Value  Expression
+}
+
+// UpdateStatement updates rows matching an optional predicate.
+type UpdateStatement struct {
+	Span        lexer.Span
+	Table       Identifier
+	Assignments []Assignment
+	Where       Expression
+}
+
+func (*UpdateStatement) statementNode() {}
+
+// SourceSpan returns the complete statement span.
+func (s *UpdateStatement) SourceSpan() lexer.Span { return s.Span }
+
+// DeleteStatement deletes rows matching an optional predicate.
+type DeleteStatement struct {
+	Span  lexer.Span
+	Table Identifier
+	Where Expression
+}
+
+func (*DeleteStatement) statementNode() {}
+
+// SourceSpan returns the complete statement span.
+func (s *DeleteStatement) SourceSpan() lexer.Span { return s.Span }
+
+// ExplainStatement requests the deterministic physical plan for a SELECT.
+type ExplainStatement struct {
+	Span   lexer.Span
+	Select *SelectStatement
+}
+
+func (*ExplainStatement) statementNode() {}
+
+// SourceSpan returns the complete statement span.
+func (s *ExplainStatement) SourceSpan() lexer.Span { return s.Span }
 
 func (*SelectStatement) statementNode() {}
 

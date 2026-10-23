@@ -60,8 +60,8 @@ func TestParseDiagnosticsGolden(t *testing.T) {
 		source string
 		want   string
 	}{
-		{"", "line 1, column 1: expected CREATE TABLE, INSERT, or SELECT, found end of input"},
-		{"CREATE users", `line 1, column 8: expected TABLE, found identifier "users"`},
+		{"", "line 1, column 1: expected CREATE, INSERT, SELECT, UPDATE, DELETE, or EXPLAIN, found end of input"},
+		{"CREATE users", `line 1, column 8: expected TABLE or [UNIQUE] INDEX, found identifier "users"`},
 		{"SELECT FROM users", `line 1, column 8: expected expression, found FROM "FROM"`},
 		{"INSERT INTO users VALUES (1,)", `line 1, column 29: expected expression, found ) ")"`},
 	}
@@ -79,9 +79,33 @@ func TestParseDiagnosticsGolden(t *testing.T) {
 }
 
 func TestParseKnownFutureStatementIsUnsupported(t *testing.T) {
-	_, err := parser.Parse("UPDATE users")
+	_, err := parser.Parse("DROP TABLE users")
 	if !errors.Is(err, dberrors.ErrUnsupported) {
 		t.Fatalf("Parse() error = %v, want unsupported category", err)
+	}
+}
+
+func TestParseM4Statements(t *testing.T) {
+	tests := []struct {
+		sql        string
+		parameters int
+		check      func(parser.Statement) bool
+	}{
+		{"CREATE UNIQUE INDEX users_email ON users (email)", 0, func(statement parser.Statement) bool { return statement.(*parser.CreateIndexStatement).Unique }},
+		{"UPDATE users SET name = ? WHERE id = ?", 2, func(statement parser.Statement) bool {
+			return len(statement.(*parser.UpdateStatement).Assignments) == 1
+		}},
+		{"DELETE FROM users WHERE id = ?", 1, func(statement parser.Statement) bool { return statement.(*parser.DeleteStatement).Where != nil }},
+		{"EXPLAIN SELECT * FROM users WHERE id = ?", 1, func(statement parser.Statement) bool { return statement.(*parser.ExplainStatement).Select != nil }},
+	}
+	for _, test := range tests {
+		statement, err := parser.Parse(test.sql)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", test.sql, err)
+		}
+		if !test.check(statement) || parser.ParameterCount(statement) != test.parameters {
+			t.Fatalf("Parse(%q) = %#v, parameters=%d", test.sql, statement, parser.ParameterCount(statement))
+		}
 	}
 }
 

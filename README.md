@@ -9,10 +9,10 @@ authoritative source for architecture, invariants, task dependencies, and
 acceptance gates. [AGENTS.md](./AGENTS.md) contains the contribution rules that
 keep implementation work aligned with that plan.
 
-Status: **M3 copy-on-write B+ tree**. The M1 in-memory SQL slice remains
-available, and low-level storage now includes immutable ordered trees, snapshot
-roots, insertion, tombstone deletion, randomized model tests, and tree
-inspection. SQL table persistence intentionally begins in M4.
+Status: **M4 persistent SQL tables and indexes**. The database now persists its
+catalog, tables, primary keys, and secondary indexes through immutable B+ tree
+roots. `INSERT`, `SELECT`, `UPDATE`, `DELETE`, unique indexes, range/index
+planning, and deterministic `EXPLAIN` survive close and reopen.
 
 ## Requirements
 
@@ -32,17 +32,22 @@ make bench
 `make check` verifies formatting, runs `go vet`, the unit tests, and the race
 detector. CI runs the same gate.
 
-## In-memory SQL shell
+## SQL shell
 
-Run the CLI without a database filename:
+Run the CLI without a database filename for an in-memory database:
 
 ```sh
 go run ./cmd/yodadb
 ```
 
-The M1 vertical slice supports `CREATE TABLE`, single-row `INSERT`, and
-single-table `SELECT` with projections and Boolean/comparison `WHERE`
-expressions:
+Pass a filename to create or reopen a persistent database:
+
+```sh
+go run ./cmd/yodadb app.yoda
+```
+
+The SQL slice supports `CREATE TABLE`, `CREATE [UNIQUE] INDEX`, single-row
+`INSERT`, `SELECT`, `UPDATE`, `DELETE`, and `EXPLAIN SELECT`:
 
 ```text
 yoda> CREATE TABLE users (id INT64 PRIMARY KEY, name TEXT NOT NULL);
@@ -52,9 +57,8 @@ yoda> SELECT name FROM users WHERE id = 1;
 Ada
 ```
 
-The database exists only in memory and disappears when the process exits.
-Opening a `.yoda` file through the SQL API is introduced with persistent storage
-in M4.
+Without a filename the database disappears when the process exits. With a
+filename, committed statements are available after restarting the process.
 
 ## Inspecting a page file
 
@@ -77,8 +81,8 @@ go run ./cmd/yodadb pages app.yoda --tree 42
 ```
 
 The output shows internal-page child ranges, leaf counts, tombstones, sibling
-references, and page generations. M4 will resolve table and index names through
-the persistent catalog; during M3 the root is supplied as a numeric page ID.
+references, and page generations. The diagnostic command currently accepts the
+root as a numeric page ID.
 
 ## Repository layout
 

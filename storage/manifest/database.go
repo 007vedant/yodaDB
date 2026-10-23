@@ -238,6 +238,90 @@ func (d *Database) Sync() error {
 	return d.pager.Sync()
 }
 
+// LatestManifest reads the manifest selected by the current metapage. An empty
+// database returns found=false.
+func (d *Database) LatestManifest() (Manifest, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return Manifest{}, false, dberrors.New(dberrors.CodeTransactionClosed, "database.latest_manifest", "database is closed")
+	}
+	if d.metadata.LatestManifestPageID == 0 {
+		return Manifest{}, false, nil
+	}
+	handle, err := d.pager.Read(d.metadata.LatestManifestPageID)
+	if err != nil {
+		return Manifest{}, false, err
+	}
+	defer handle.Release()
+	stored := handle.Page()
+	if stored.Header.Type != page.TypeManifest {
+		return Manifest{}, false, dberrors.New(dberrors.CodeCorruption, "database.latest_manifest", fmt.Sprintf("page %d has type %s", stored.Header.PageID, stored.Header.Type))
+	}
+	record, err := DecodeManifest(stored.Payload)
+	if err != nil {
+		return Manifest{}, false, err
+	}
+	if record.TxnID != d.metadata.LatestTxnID {
+		return Manifest{}, false, dberrors.New(dberrors.CodeCorruption, "database.latest_manifest", "manifest transaction disagrees with metapage")
+	}
+	return record, true, nil
+}
+
+// Publish appends and synchronizes a manifest, then publishes it through the
+// older metapage slot. M5 strengthens and fault-tests this commit protocol.
+func (d *Database) Publish(ctx context.Context, record Manifest) (page.ID, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return 0, dberrors.New(dberrors.CodeTransactionClosed, "database.publish", "database is closed")
+	}
+	if d.readOnly {
+		return 0, dberrors.New(dberrors.CodeConstraint, "database.publish", "database is read-only")
+	}
+	if err := contextFailure(ctx, "database.publish"); err != nil {
+		return 0, err
+	}
+	if record.TxnID != d.metadata.LatestTxnID+1 || record.ParentTxnID != d.metadata.LatestTxnID {
+		return 0, dberrors.New(dberrors.CodeConflict, "database.publish", "manifest does not extend the selected transaction")
+	}
+	payload, err := EncodeManifest(record)
+	if err != nil {
+		return 0, err
+	}
+	manifestID, err := d.pager.Append(page.TypeManifest, record.TxnID, payload)
+	if err != nil {
+		return 0, err
+	}
+	if err := d.pager.Sync(); err != nil {
+		return 0, err
+	}
+	if err := contextFailure(ctx, "database.publish"); err != nil {
+		return 0, err
+	}
+	target := page.ID(1)
+	if d.metadata.ActiveSlot == 1 {
+		target = 0
+	}
+	meta := d.metadata.Meta
+	meta.LatestTxnID = record.TxnID
+	meta.LatestManifestPageID = manifestID
+	meta.OldestRetainedTxnID = record.OldestRetainedTxnID
+	generation := d.metadata.Generation + 1
+	encoded, err := EncodeMetapage(target, generation, meta)
+	if err != nil {
+		return 0, err
+	}
+	if err := writeFullAt(d.file, encoded, int64(target)*page.Size); err != nil {
+		return 0, dberrors.Wrap(err, dberrors.CodeIO, "database.publish", "write metapage")
+	}
+	if err := d.file.Sync(); err != nil {
+		return 0, err
+	}
+	d.metadata = Metadata{Meta: meta, ActiveSlot: target, Generation: generation}
+	return manifestID, nil
+}
+
 // Close releases the pager, file, and advisory lock.
 func (d *Database) Close() error {
 	d.mu.Lock()

@@ -32,6 +32,11 @@ var keywords = map[string]Kind{
 	"delete":  Delete,
 	"drop":    Drop,
 	"alter":   Alter,
+	"index":   Index,
+	"unique":  Unique,
+	"on":      On,
+	"set":     Set,
+	"explain": Explain,
 }
 
 // Error describes a lexical failure at a source span.

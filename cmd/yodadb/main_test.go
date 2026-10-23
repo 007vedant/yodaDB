@@ -122,14 +122,21 @@ func TestRunVersion(t *testing.T) {
 	}
 }
 
-func TestRunRejectsDatabaseUntilImplemented(t *testing.T) {
+func TestRunPersistentSQLScenarioAcrossProcesses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.yoda")
+	firstInput := strings.NewReader("CREATE TABLE users (id INT64 PRIMARY KEY, name TEXT NOT NULL);\n" +
+		"INSERT INTO users VALUES (1, 'Ada');\n")
 	var stdout, stderr bytes.Buffer
-
-	if code := run([]string{"example.yoda"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("run with database returned %d, want 2", code)
+	if code := runWithInput([]string{path}, firstInput, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("first process returned %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "not implemented") {
-		t.Fatalf("error output %q does not explain unsupported operation", stderr.String())
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithInput([]string{path}, strings.NewReader("SELECT name FROM users WHERE id = 1;\n"), &stdout, &stderr); code != 0 {
+		t.Fatalf("reopen returned %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Ada") || stderr.Len() != 0 {
+		t.Fatalf("reopened output=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 

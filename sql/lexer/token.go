@@ -62,6 +62,11 @@ const (
 	Delete
 	Drop
 	Alter
+	Index
+	Unique
+	On
+	Set
+	Explain
 )
 
 var kindNames = [...]string{
@@ -107,6 +112,11 @@ var kindNames = [...]string{
 	Delete:           "DELETE",
 	Drop:             "DROP",
 	Alter:            "ALTER",
+	Index:            "INDEX",
+	Unique:           "UNIQUE",
+	On:               "ON",
+	Set:              "SET",
+	Explain:          "EXPLAIN",
 }
 
 // String returns a diagnostic token name.

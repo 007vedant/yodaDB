@@ -60,24 +60,38 @@ type parser struct {
 func (p *parser) parseStatement() (Statement, error) {
 	switch p.peek().Kind {
 	case lexer.Create:
-		return p.parseCreateTable()
+		return p.parseCreate()
 	case lexer.Insert:
 		return p.parseInsert()
 	case lexer.Select:
 		return p.parseSelect()
-	case lexer.Update, lexer.Delete, lexer.Drop, lexer.Alter:
+	case lexer.Update:
+		return p.parseUpdate()
+	case lexer.Delete:
+		return p.parseDelete()
+	case lexer.Explain:
+		return p.parseExplain()
+	case lexer.Drop, lexer.Alter:
 		found := p.advance()
-		return nil, &Error{Span: found.Span, Expected: "a SQL feature supported in M1", Found: found, Category: dberrors.CodeUnsupported}
+		return nil, &Error{Span: found.Span, Expected: "a supported SQL statement", Found: found, Category: dberrors.CodeUnsupported}
 	default:
-		return nil, p.expected("CREATE TABLE, INSERT, or SELECT")
+		return nil, p.expected("CREATE, INSERT, SELECT, UPDATE, DELETE, or EXPLAIN")
 	}
 }
 
-func (p *parser) parseCreateTable() (Statement, error) {
+func (p *parser) parseCreate() (Statement, error) {
 	start := p.advance().Span.Start
-	if _, err := p.expect(lexer.Table, "TABLE"); err != nil {
+	if p.match(lexer.Table) {
+		return p.parseCreateTable(start)
+	}
+	unique := p.match(lexer.Unique)
+	if _, err := p.expect(lexer.Index, "TABLE or [UNIQUE] INDEX"); err != nil {
 		return nil, err
 	}
+	return p.parseCreateIndex(start, unique)
+}
+
+func (p *parser) parseCreateTable(start lexer.Position) (Statement, error) {
 	table, err := p.parseIdentifier("table name")
 	if err != nil {
 		return nil, err
@@ -102,6 +116,39 @@ func (p *parser) parseCreateTable() (Statement, error) {
 		return nil, err
 	}
 	return &CreateTableStatement{Span: span(start, end.Span.End), Table: table, Columns: columns}, nil
+}
+
+func (p *parser) parseCreateIndex(start lexer.Position, unique bool) (Statement, error) {
+	name, err := p.parseIdentifier("index name")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.On, "ON"); err != nil {
+		return nil, err
+	}
+	table, err := p.parseIdentifier("table name")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.LeftParen, "'('"); err != nil {
+		return nil, err
+	}
+	columns := make([]Identifier, 0, 2)
+	for {
+		column, err := p.parseIdentifier("index column")
+		if err != nil {
+			return nil, err
+		}
+		columns = append(columns, column)
+		if !p.match(lexer.Comma) {
+			break
+		}
+	}
+	end, err := p.expect(lexer.RightParen, "')'")
+	if err != nil {
+		return nil, err
+	}
+	return &CreateIndexStatement{Span: span(start, end.Span.End), Name: name, Table: table, Columns: columns, Unique: unique}, nil
 }
 
 func (p *parser) parseColumnDefinition() (ColumnDefinition, error) {
@@ -200,6 +247,79 @@ func (p *parser) parseSelect() (Statement, error) {
 		end = where.SourceSpan().End
 	}
 	return &SelectStatement{Span: span(start, end), Table: table, Projections: projections, Where: where}, nil
+}
+
+func (p *parser) parseUpdate() (Statement, error) {
+	start := p.advance().Span.Start
+	table, err := p.parseIdentifier("table name")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.Set, "SET"); err != nil {
+		return nil, err
+	}
+	assignments := make([]Assignment, 0, 2)
+	for {
+		column, err := p.parseIdentifier("column name")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.Equal, "'='"); err != nil {
+			return nil, err
+		}
+		value, err := p.parseExpression(precedenceLowest)
+		if err != nil {
+			return nil, err
+		}
+		assignments = append(assignments, Assignment{Span: span(column.Span.Start, value.SourceSpan().End), Column: column, Value: value})
+		if !p.match(lexer.Comma) {
+			break
+		}
+	}
+	end := assignments[len(assignments)-1].Span.End
+	var where Expression
+	if p.match(lexer.Where) {
+		where, err = p.parseExpression(precedenceLowest)
+		if err != nil {
+			return nil, err
+		}
+		end = where.SourceSpan().End
+	}
+	return &UpdateStatement{Span: span(start, end), Table: table, Assignments: assignments, Where: where}, nil
+}
+
+func (p *parser) parseDelete() (Statement, error) {
+	start := p.advance().Span.Start
+	if _, err := p.expect(lexer.From, "FROM"); err != nil {
+		return nil, err
+	}
+	table, err := p.parseIdentifier("table name")
+	if err != nil {
+		return nil, err
+	}
+	end := table.Span.End
+	var where Expression
+	if p.match(lexer.Where) {
+		where, err = p.parseExpression(precedenceLowest)
+		if err != nil {
+			return nil, err
+		}
+		end = where.SourceSpan().End
+	}
+	return &DeleteStatement{Span: span(start, end), Table: table, Where: where}, nil
+}
+
+func (p *parser) parseExplain() (Statement, error) {
+	start := p.advance().Span.Start
+	if p.peek().Kind != lexer.Select {
+		return nil, p.expected("SELECT")
+	}
+	statement, err := p.parseSelect()
+	if err != nil {
+		return nil, err
+	}
+	selected := statement.(*SelectStatement)
+	return &ExplainStatement{Span: span(start, selected.Span.End), Select: selected}, nil
 }
 
 func (p *parser) parseSelectItem() (SelectItem, error) {
@@ -448,6 +568,15 @@ func ParameterCount(statement Statement) int {
 			walk(item.Expr)
 		}
 		walk(statement.Where)
+	case *UpdateStatement:
+		for _, assignment := range statement.Assignments {
+			walk(assignment.Value)
+		}
+		walk(statement.Where)
+	case *DeleteStatement:
+		walk(statement.Where)
+	case *ExplainStatement:
+		return ParameterCount(statement.Select)
 	}
 	return count
 }

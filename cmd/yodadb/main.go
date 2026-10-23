@@ -48,11 +48,27 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
 		SilenceUsage:  true,
 		Args:          cobra.MaximumNArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			if len(args) != 0 {
-				return errors.New("database files are not implemented until M4; run without a filename for the in-memory shell")
+			if len(args) == 0 {
+				if code := runShell(command.Context(), stdin, stdout, stderr); code != 0 {
+					return errors.New("in-memory shell failed")
+				}
+				return nil
 			}
-			if code := runShell(command.Context(), stdin, stdout, stderr); code != 0 {
-				return errors.New("in-memory shell failed")
+			var database *yodadb.DB
+			var err error
+			if _, statErr := os.Stat(args[0]); errors.Is(statErr, os.ErrNotExist) {
+				database, err = yodadb.Create(command.Context(), args[0])
+			} else if statErr != nil {
+				return statErr
+			} else {
+				database, err = yodadb.Open(command.Context(), args[0])
+			}
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+			if code := runShellDatabase(command.Context(), database, stdin, stdout, stderr); code != 0 {
+				return errors.New("persistent shell failed")
 			}
 			return nil
 		},
@@ -134,6 +150,10 @@ func newPagesCommand(stdout io.Writer) *cobra.Command {
 func runShell(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) int {
 	database := yodadb.New()
 	defer database.Close()
+	return runShellDatabase(ctx, database, stdin, stdout, stderr)
+}
+
+func runShellDatabase(ctx context.Context, database *yodadb.DB, stdin io.Reader, stdout, stderr io.Writer) int {
 	scanner := bufio.NewScanner(stdin)
 	var statement strings.Builder
 	for {

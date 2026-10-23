@@ -881,15 +881,17 @@ Gate:
 
 Outcome: the initial SQL demo survives close/reopen and uses indexes.
 
-| ID | Task | Depends on | Deliverable |
-|---|---|---|---|
-| M4.1 | Manifest/root-set codec | M3 | versioned root maps and parent link |
-| M4.2 | Persistent catalog | M4.1,M1.4 | transactional catalog B+ tree |
-| M4.3 | Table access method | M3,M2.2 | hidden RowID/primary-key table tree |
-| M4.4 | Secondary index maintenance | M4.2,M4.3 | unique and non-unique indexes |
-| M4.5 | Persistent executor integration | M4.2-M4.4,M1.6 | create/insert/select through storage |
-| M4.6 | UPDATE and DELETE | M4.5 | row replacement/tombstone plus index updates |
-| M4.7 | Rule-based index planning | M4.4,M4.5 | equality/range index scans and `EXPLAIN` |
+Status: **[x] verified (2026-10-23)**
+
+| ID | Status | Task | Depends on | Deliverable |
+|---|---|---|---|---|
+| M4.1 | [x] verified | Manifest/root-set codec | M3 | versioned root maps and parent link |
+| M4.2 | [x] verified | Persistent catalog | M4.1,M1.4 | transactional catalog B+ tree |
+| M4.3 | [x] verified | Table access method | M3,M2.2 | hidden RowID/primary-key table tree |
+| M4.4 | [x] verified | Secondary index maintenance | M4.2,M4.3 | unique and non-unique indexes |
+| M4.5 | [x] verified | Persistent executor integration | M4.2-M4.4,M1.6 | create/insert/select through storage |
+| M4.6 | [x] verified | UPDATE and DELETE | M4.5 | row replacement/tombstone plus index updates |
+| M4.7 | [x] verified | Rule-based index planning | M4.4,M4.5 | equality/range index scans and `EXPLAIN` |
 
 Gate:
 

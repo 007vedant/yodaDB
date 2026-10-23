@@ -1,2 +1,2 @@
-// Package plan will own logical and physical query plans.
+// Package plan chooses deterministic physical access paths for bound queries.
 package plan

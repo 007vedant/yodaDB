@@ -130,3 +130,42 @@ func TestBindRejectsUnknownTypeAndDuplicateColumn(t *testing.T) {
 		}
 	}
 }
+
+func TestBindM4Statements(t *testing.T) {
+	schema := usersCatalog(t)
+	table, _ := schema.LookupTable("users")
+
+	bound, err := parseAndBind(t, schema, "CREATE UNIQUE INDEX users_name ON users (name)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := bound.(*binder.CreateIndex)
+	if !created.Unique || created.Table.ID != table.ID || created.ColumnIDs[0] != table.Columns[1].ID {
+		t.Fatalf("bound index = %#v", created)
+	}
+
+	bound, err = parseAndBind(t, schema, "UPDATE users SET name = 'Grace' WHERE id = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := bound.(*binder.Update)
+	if updated.Assignments[0].ColumnIndex != 1 || updated.Where == nil {
+		t.Fatalf("bound update = %#v", updated)
+	}
+
+	bound, err = parseAndBind(t, schema, "DELETE FROM users WHERE id = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.(*binder.Delete).Where == nil {
+		t.Fatal("DELETE predicate was not bound")
+	}
+
+	bound, err = parseAndBind(t, schema, "EXPLAIN SELECT name FROM users WHERE id = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.(*binder.Explain).Select.Table.ID != table.ID {
+		t.Fatal("EXPLAIN SELECT table was not bound")
+	}
+}

@@ -62,6 +62,42 @@ func TestCreateAppendCloseReopen(t *testing.T) {
 	}
 }
 
+func TestPublishAndReopenLatestManifest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "published.yoda")
+	database, err := manifest.Create(context.Background(), path, manifest.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := manifest.Manifest{TxnID: 1, TableRoots: map[uint64]page.ID{1: 0}, IndexRoots: map[uint64]page.ID{1: 0}}
+	manifestID, err := database.Publish(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifestID != 2 {
+		t.Fatalf("manifest page = %d, want 2", manifestID)
+	}
+	metadata := database.Metadata()
+	if metadata.ActiveSlot != 1 || metadata.Generation != 2 || metadata.LatestTxnID != 1 || metadata.LatestManifestPageID != manifestID {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	latest, found, err := database.LatestManifest()
+	if err != nil || !found || latest.TxnID != 1 || latest.TableRoots[1] != 0 {
+		t.Fatalf("LatestManifest = %#v, %t, %v", latest, found, err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := manifest.Open(context.Background(), path, manifest.Options{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	latest, found, err = reopened.LatestManifest()
+	if err != nil || !found || latest.TxnID != 1 || reopened.Metadata().ActiveSlot != 1 {
+		t.Fatalf("reopened manifest = %#v, %t, %v", latest, found, err)
+	}
+}
+
 func TestOpenFallsBackToOlderValidMetapage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fallback.yoda")
 	database, err := manifest.Create(context.Background(), path, manifest.Options{})
