@@ -33,6 +33,7 @@ type DB struct {
 	manifest     manifest.Manifest
 	writeTxn     *txn.Write
 	writeCatalog *catalog.Catalog
+	readPins     map[uint64]uint64
 	txOwner      uint64
 	nextTxID     uint64
 }
@@ -207,6 +208,7 @@ func (db *DB) Close() error {
 		_ = db.writeTxn.Rollback()
 		db.clearWrite()
 	}
+	db.readPins = nil
 	db.closed = true
 	if db.storage != nil {
 		return db.storage.Close()
@@ -215,6 +217,10 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) prepare(sql string, arguments []any) (binder.Statement, error) {
+	return db.prepareWithCatalog(sql, arguments, db.currentCatalog())
+}
+
+func (db *DB) prepareWithCatalog(sql string, arguments []any, schema *catalog.Catalog) (binder.Statement, error) {
 	parsed, err := parser.Parse(sql)
 	if err != nil {
 		return nil, err
@@ -226,7 +232,7 @@ func (db *DB) prepare(sql string, arguments []any) (binder.Statement, error) {
 			return nil, dberrors.Wrap(err, dberrors.CodeType, "db.bind_argument", fmt.Sprintf("argument %d", index+1))
 		}
 	}
-	return binder.Bind(parsed, db.currentCatalog(), parameters)
+	return binder.Bind(parsed, schema, parameters)
 }
 
 func (db *DB) executeBound(ctx context.Context, owner uint64, statement binder.Statement) (Outcome, error) {
@@ -383,11 +389,15 @@ func (db *DB) insertPersistent(ctx context.Context, statement *binder.Insert) (O
 
 func (db *DB) selectPersistent(ctx context.Context, statement *binder.Select) (Outcome, error) {
 	current := db.currentManifest()
+	return db.selectPersistentAt(ctx, statement, current, db.currentCatalog())
+}
+
+func (db *DB) selectPersistentAt(ctx context.Context, statement *binder.Select, current manifest.Manifest, schema *catalog.Catalog) (Outcome, error) {
 	tableTree, err := db.openTable(statement.Table, current.TableRoots[uint64(statement.Table.ID)])
 	if err != nil {
 		return Outcome{}, err
 	}
-	records, err := db.selectRecords(ctx, statement, tableTree)
+	records, err := db.selectRecordsAt(ctx, statement, tableTree, current, schema)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -539,8 +549,8 @@ func (db *DB) deletePersistent(ctx context.Context, statement *binder.Delete) (O
 	return Outcome{Result: Result{rowsAffected: affected}}, nil
 }
 
-func (db *DB) selectRecords(ctx context.Context, statement *binder.Select, tableTree *table.Tree) ([]table.Record, error) {
-	access := plan.ChooseSelect(statement, db.currentCatalog())
+func (db *DB) selectRecordsAt(ctx context.Context, statement *binder.Select, tableTree *table.Tree, current manifest.Manifest, schema *catalog.Catalog) ([]table.Record, error) {
+	access := plan.ChooseSelect(statement, schema)
 	switch access.Kind {
 	case plan.PrimaryKeyLookup:
 		key, err := tableTree.EncodePrimaryKey(access.Value)
@@ -564,7 +574,6 @@ func (db *DB) selectRecords(ctx context.Context, statement *binder.Select, table
 		if err != nil {
 			return nil, err
 		}
-		current := db.currentManifest()
 		indexTree, err := storageindex.Open(db.storage, current.IndexRoots[uint64(access.Index.ID)], definition)
 		if err != nil {
 			return nil, err

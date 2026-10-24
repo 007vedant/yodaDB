@@ -929,14 +929,16 @@ Do not proceed to multi-writer work until this gate is repeatedly green.
 
 Outcome: readers remain stable while later commits publish new roots.
 
-| ID | Task | Depends on | Deliverable |
-|---|---|---|---|
-| M6.1 | Snapshot handle/root pinning | M5 | manifest-bound read transactions |
-| M6.2 | Concurrent readers + writer | M6.1 | synchronization with race tests |
-| M6.3 | Manifest history traversal | M4.1,M6.1 | exact lookup by transaction ID |
-| M6.4 | Historical SQL binding | M6.3,M4 | `AS OF TRANSACTION` |
-| M6.5 | Retention and named snapshots | M6.3 | pin/drop policy and errors |
-| M6.6 | History diagnostics | M6.3 | CLI listing and root summaries |
+Status: **in progress**
+
+| ID | Status | Task | Depends on | Deliverable |
+|---|---|---|---|---|
+| M6.1 | [x] verified | Snapshot handle/root pinning | M5 | manifest-bound read transactions |
+| M6.2 | [ ] not started | Concurrent readers + writer | M6.1 | synchronization with race tests |
+| M6.3 | [ ] not started | Manifest history traversal | M4.1,M6.1 | exact lookup by transaction ID |
+| M6.4 | [ ] not started | Historical SQL binding | M6.3,M4 | `AS OF TRANSACTION` |
+| M6.5 | [ ] not started | Retention and named snapshots | M6.3 | pin/drop policy and errors |
+| M6.6 | [ ] not started | History diagnostics | M6.3 | CLI listing and root summaries |
 
 Gate:
 
