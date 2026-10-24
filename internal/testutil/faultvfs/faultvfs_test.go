@@ -253,6 +253,30 @@ func TestArmSchedulesFaultsAfterSetup(t *testing.T) {
 	}
 }
 
+func TestProcessCrashRetainsUnsyncedVisibleBytes(t *testing.T) {
+	fs := newFS(t, faultvfs.Config{})
+	file := openFile(t, fs, "database", vfs.OpenOptions{Create: true})
+	write(t, file, []byte("visible"), 0)
+
+	fs.ProcessCrash()
+	if _, err := file.Size(); !errors.Is(err, faultvfs.ErrCrash) {
+		t.Fatalf("stale handle Size error = %v, want ErrCrash", err)
+	}
+	reopened := openFile(t, fs, "database", vfs.OpenOptions{})
+	buffer := make([]byte, len("visible"))
+	if _, err := reopened.ReadAt(buffer, 0); err != nil {
+		t.Fatalf("ReadAt after process crash: %v", err)
+	}
+	if got := string(buffer); got != "visible" {
+		t.Fatalf("visible bytes = %q, want visible", got)
+	}
+
+	fs.Crash()
+	if got := fs.Visible("database"); len(got) != 0 {
+		t.Fatalf("visible bytes after power crash = %q, want empty", got)
+	}
+}
+
 func TestLockingAndOpenOptions(t *testing.T) {
 	fs := newFS(t, faultvfs.Config{})
 	first := openFile(t, fs, "database", vfs.OpenOptions{Create: true, Exclusive: true})
@@ -308,6 +332,7 @@ func TestInvalidSchedulesAreRejected(t *testing.T) {
 		{Faults: []faultvfs.Fault{{Kind: faultvfs.Read, At: 0, Action: faultvfs.Fail}}},
 		{SyncBehaviors: []faultvfs.SyncBehavior{{At: 0, Mode: faultvfs.SyncAll}}},
 		{SyncBehaviors: []faultvfs.SyncBehavior{{At: 1, Mode: faultvfs.SyncNone, MutationOrder: []int{1}}}},
+		{CrashAfter: 1, ProcessCrashAfter: 1},
 	}
 	for index, config := range tests {
 		if _, err := faultvfs.New(config); dberrors.CodeOf(err) != dberrors.CodeConstraint {

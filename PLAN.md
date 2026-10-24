@@ -913,7 +913,7 @@ Status: **in progress**
 | M5.3 | [x] verified | Fault-injection VFS | M2.1 | crash, tear, short I/O, sync simulation |
 | M5.4 | [x] verified | Exhaustive commit crash matrix | M5.2,M5.3 | old-or-new-state proof by testing |
 | M5.5 | [x] verified | Recovery/open validation | M5.2 | select valid generation, ignore garbage tail |
-| M5.6 | [ ] not started | Durability modes | M5.4 | explicit full/process contracts |
+| M5.6 | [x] verified | Durability modes | M5.4 | explicit full/process contracts |
 | M5.7 | [ ] not started | Transactional DDL | M5.1-M5.5 | atomic catalog and data publication |
 
 Gate:

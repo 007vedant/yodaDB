@@ -18,6 +18,7 @@ import (
 type Options struct {
 	CachePages int
 	ReadOnly   bool
+	Durability Durability
 }
 
 // Metadata is the selected metapage state and its physical slot.
@@ -36,6 +37,7 @@ type Database struct {
 	pager       *pager.Pager
 	metadata    Metadata
 	readOnly    bool
+	durability  Durability
 	closed      bool
 	writeFailed bool
 }
@@ -48,6 +50,9 @@ func Create(ctx context.Context, path string, options Options) (*Database, error
 // CreateWithVFS creates and opens a new empty database through filesystem.
 func CreateWithVFS(ctx context.Context, filesystem vfs.VFS, path string, options Options) (*Database, error) {
 	if err := contextFailure(ctx, "database.create"); err != nil {
+		return nil, err
+	}
+	if err := validateDurability(options.Durability, "database.create"); err != nil {
 		return nil, err
 	}
 	if options.ReadOnly {
@@ -85,8 +90,10 @@ func CreateWithVFS(ctx context.Context, filesystem vfs.VFS, path string, options
 	if err := writeFullAt(file, second, page.Size); err != nil {
 		return nil, dberrors.Wrap(err, dberrors.CodeIO, "database.create", "write metapage 1")
 	}
-	if err := file.Sync(); err != nil {
-		return nil, err
+	if options.Durability == DurabilityFull {
+		if err := file.Sync(); err != nil {
+			return nil, err
+		}
 	}
 	pageManager, err := pager.Open(file, options.CachePages)
 	if err != nil {
@@ -94,10 +101,11 @@ func CreateWithVFS(ctx context.Context, filesystem vfs.VFS, path string, options
 	}
 	keep = true
 	return &Database{
-		path:     path,
-		file:     file,
-		pager:    pageManager,
-		metadata: Metadata{Meta: meta, ActiveSlot: 0, Generation: 1},
+		path:       path,
+		file:       file,
+		pager:      pageManager,
+		metadata:   Metadata{Meta: meta, ActiveSlot: 0, Generation: 1},
+		durability: options.Durability,
 	}, nil
 }
 
@@ -109,6 +117,9 @@ func Open(ctx context.Context, path string, options Options) (*Database, error) 
 // OpenWithVFS opens an existing database and selects its newest valid metapage.
 func OpenWithVFS(ctx context.Context, filesystem vfs.VFS, path string, options Options) (*Database, error) {
 	if err := contextFailure(ctx, "database.open"); err != nil {
+		return nil, err
+	}
+	if err := validateDurability(options.Durability, "database.open"); err != nil {
 		return nil, err
 	}
 	file, err := filesystem.Open(path, vfs.OpenOptions{ReadOnly: options.ReadOnly})
@@ -196,11 +207,12 @@ func OpenWithVFS(ctx context.Context, filesystem vfs.VFS, path string, options O
 	}
 	keep = true
 	return &Database{
-		path:     path,
-		file:     file,
-		pager:    pageManager,
-		metadata: Metadata{Meta: selected.Meta, ActiveSlot: selected.Slot, Generation: selected.Generation},
-		readOnly: options.ReadOnly,
+		path:       path,
+		file:       file,
+		pager:      pageManager,
+		metadata:   Metadata{Meta: selected.Meta, ActiveSlot: selected.Slot, Generation: selected.Generation},
+		readOnly:   options.ReadOnly,
+		durability: options.Durability,
 	}, nil
 }
 
@@ -209,6 +221,13 @@ func (d *Database) Metadata() Metadata {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.metadata
+}
+
+// Durability returns the commit durability selected when the handle opened.
+func (d *Database) Durability() Durability {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.durability
 }
 
 // PageCount returns the current number of complete pages.
@@ -341,9 +360,11 @@ func (d *Database) Publish(ctx context.Context, record Manifest) (page.ID, error
 		}
 		return 0, err
 	}
-	if err := d.pager.Sync(); err != nil {
-		d.writeFailed = true
-		return 0, err
+	if d.durability == DurabilityFull {
+		if err := d.pager.Sync(); err != nil {
+			d.writeFailed = true
+			return 0, err
+		}
 	}
 	if err := contextFailure(ctx, "database.publish"); err != nil {
 		return 0, err
@@ -365,9 +386,11 @@ func (d *Database) Publish(ctx context.Context, record Manifest) (page.ID, error
 		d.writeFailed = true
 		return 0, dberrors.Wrap(err, dberrors.CodeIO, "database.publish", "write metapage")
 	}
-	if err := d.file.Sync(); err != nil {
-		d.writeFailed = true
-		return 0, err
+	if d.durability == DurabilityFull {
+		if err := d.file.Sync(); err != nil {
+			d.writeFailed = true
+			return 0, err
+		}
 	}
 	d.metadata = Metadata{Meta: meta, ActiveSlot: target, Generation: generation}
 	return manifestID, nil

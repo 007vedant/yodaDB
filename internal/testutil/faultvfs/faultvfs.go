@@ -12,23 +12,24 @@ import (
 	"yodadb/storage/vfs"
 )
 
-// ErrCrash identifies a simulated process crash.
+// ErrCrash identifies a simulated process or power-loss crash.
 var ErrCrash = errors.New("simulated process crash")
 
 // Kind identifies an operation in the deterministic operation log.
 type Kind string
 
 const (
-	Open     Kind = "open"
-	Read     Kind = "read"
-	Write    Kind = "write"
-	Sync     Kind = "sync"
-	Truncate Kind = "truncate"
-	Size     Kind = "size"
-	Lock     Kind = "lock"
-	Unlock   Kind = "unlock"
-	Close    Kind = "close"
-	Crash    Kind = "crash"
+	Open         Kind = "open"
+	Read         Kind = "read"
+	Write        Kind = "write"
+	Sync         Kind = "sync"
+	Truncate     Kind = "truncate"
+	Size         Kind = "size"
+	Lock         Kind = "lock"
+	Unlock       Kind = "unlock"
+	Close        Kind = "close"
+	Crash        Kind = "crash"
+	ProcessCrash Kind = "process_crash"
 )
 
 // Action describes how a matching operation is altered.
@@ -70,9 +71,12 @@ type SyncBehavior struct {
 type Config struct {
 	Faults        []Fault
 	SyncBehaviors []SyncBehavior
-	// CrashAfter crashes immediately after this global operation sequence number.
-	// Zero disables automatic crash injection.
+	// CrashAfter discards unsynced bytes immediately after this global operation
+	// sequence number. Zero disables automatic crash injection.
 	CrashAfter uint64
+	// ProcessCrashAfter invalidates process handles but retains kernel-visible
+	// unsynced bytes after this global operation sequence number.
+	ProcessCrashAfter uint64
 }
 
 // Operation records one VFS call without recording user data.
@@ -144,6 +148,9 @@ func cloneConfig(config Config) Config {
 }
 
 func validateConfig(config Config) error {
+	if config.CrashAfter != 0 && config.ProcessCrashAfter != 0 {
+		return constraint("faultvfs.new", "power and process crash boundaries are mutually exclusive")
+	}
 	seenFault := make(map[[2]int64]struct{})
 	for _, fault := range config.Faults {
 		if fault.At <= 0 || fault.Bytes < 0 {
@@ -187,7 +194,7 @@ func validateConfig(config Config) error {
 }
 
 func kindNumber(kind Kind) int {
-	for index, candidate := range []Kind{Open, Read, Write, Sync, Truncate, Size, Lock, Unlock, Close, Crash} {
+	for index, candidate := range []Kind{Open, Read, Write, Sync, Truncate, Size, Lock, Unlock, Close, Crash, ProcessCrash} {
 		if candidate == kind {
 			return index + 1
 		}
@@ -228,12 +235,20 @@ func (fs *FS) Open(path string, options vfs.OpenOptions) (vfs.File, error) {
 	return handle, nil
 }
 
-// Crash simulates loss of the process and all unsynced state. Existing handles
+// Crash simulates power loss by discarding unsynced state. Existing handles
 // become invalid and locks are released.
 func (fs *FS) Crash() {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	fs.crashLocked(true)
+	fs.crashLocked(Crash, true, true)
+}
+
+// ProcessCrash invalidates handles and releases locks while retaining unsynced
+// bytes as process-visible kernel state.
+func (fs *FS) ProcessCrash() {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.crashLocked(ProcessCrash, false, true)
 }
 
 // Operations returns an independent snapshot of the deterministic log.
@@ -293,25 +308,31 @@ func (fs *FS) finishLocked(operation Operation, err error) error {
 	operation.Err = err
 	fs.operations = append(fs.operations, operation)
 	if !fs.crashing && fs.config.CrashAfter == operation.Sequence {
-		fs.crashLocked(true)
+		fs.crashLocked(Crash, true, true)
 		return ioError(ErrCrash, "faultvfs.crash", operation.Path)
+	}
+	if !fs.crashing && fs.config.ProcessCrashAfter == operation.Sequence {
+		fs.crashLocked(ProcessCrash, false, true)
+		return ioError(ErrCrash, "faultvfs.process_crash", operation.Path)
 	}
 	return err
 }
 
-func (fs *FS) crashLocked(log bool) {
+func (fs *FS) crashLocked(kind Kind, discardUnsynced, log bool) {
 	fs.crashing = true
 	for _, state := range fs.files {
-		state.visible = slices.Clone(state.durable)
-		state.pending = nil
+		if discardUnsynced {
+			state.visible = slices.Clone(state.durable)
+			state.pending = nil
+		}
 		clear(state.shared)
 		state.exclusive = 0
 	}
 	fs.epoch++
 	if log {
-		fs.occurrences[Crash]++
+		fs.occurrences[kind]++
 		fs.operations = append(fs.operations, Operation{
-			Sequence: uint64(len(fs.operations) + 1), Kind: Crash, Occurrence: fs.occurrences[Crash], Err: ErrCrash,
+			Sequence: uint64(len(fs.operations) + 1), Kind: kind, Occurrence: fs.occurrences[kind], Err: ErrCrash,
 		})
 	}
 	fs.crashing = false

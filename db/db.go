@@ -36,6 +36,21 @@ type DB struct {
 	nextTxID uint64
 }
 
+// Durability is the persistence contract for successful commits.
+type Durability = manifest.Durability
+
+const (
+	// DurabilityFull survives process and power loss subject to filesystem guarantees.
+	DurabilityFull = manifest.DurabilityFull
+	// DurabilityProcess survives process failure but does not issue power-loss barriers.
+	DurabilityProcess = manifest.DurabilityProcess
+)
+
+// Options controls a persistent database handle.
+type Options struct {
+	Durability Durability
+}
+
 // New creates an empty in-memory database.
 func New() *DB {
 	schema := catalog.New()
@@ -44,7 +59,12 @@ func New() *DB {
 
 // Create creates an empty persistent database file.
 func Create(ctx context.Context, path string) (*DB, error) {
-	storage, err := manifest.Create(ctx, path, manifest.Options{})
+	return CreateWithOptions(ctx, path, Options{})
+}
+
+// CreateWithOptions creates a persistent database with an explicit durability contract.
+func CreateWithOptions(ctx context.Context, path string, options Options) (*DB, error) {
+	storage, err := manifest.Create(ctx, path, manifest.Options{Durability: options.Durability})
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +81,12 @@ func Create(ctx context.Context, path string) (*DB, error) {
 // Open opens a persistent database and reconstructs its latest catalog/root
 // snapshot.
 func Open(ctx context.Context, path string) (*DB, error) {
-	storage, err := manifest.Open(ctx, path, manifest.Options{})
+	return OpenWithOptions(ctx, path, Options{})
+}
+
+// OpenWithOptions opens a persistent database with an explicit durability contract.
+func OpenWithOptions(ctx context.Context, path string, options Options) (*DB, error) {
+	storage, err := manifest.Open(ctx, path, manifest.Options{Durability: options.Durability})
 	if err != nil {
 		return nil, err
 	}

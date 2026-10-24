@@ -26,11 +26,24 @@ I/O or synchronization failure makes the commit fail. Until recovery logic can
 prove the handle's state, a failed publication leaves that handle unusable for
 further writes.
 
+M5.6 implements the modes as an explicit option on persistent `db` and
+`manifest` handles. `DurabilityFull` is the zero value. It synchronizes initial
+metapages, then uses one barrier for new pages plus the manifest and a second
+barrier for metapage publication. `DurabilityProcess` issues the same writes in
+the same order but omits those automatic barriers. An explicit `Sync` call
+still requests a barrier in either mode.
+
+The deterministic VFS distinguishes process termination, which retains
+kernel-visible unsynchronized bytes, from power loss, which discards them. The
+tests verify old-or-new recovery at every process-mode publication boundary,
+full-mode survival of power loss, and the deliberately weaker power-loss
+contract of process mode.
+
 ## Consequences
 
 Safe behavior is the default and weaker behavior is visible in configuration and
-tests. Full durability has foreground latency. The exact syscall sequence and
-supported filesystem matrix must be validated during M5.
+tests. Full durability has foreground latency. Platform support must continue
+to document and test the filesystem guarantees behind successful sync calls.
 
 ## Alternatives considered
 
