@@ -1,2 +1,2 @@
-// Package testutil will provide shared fixtures and fault-injection helpers.
+// Package testutil provides shared fixtures and fault-injection helpers.
 package testutil

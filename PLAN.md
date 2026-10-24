@@ -910,7 +910,7 @@ Status: **in progress**
 |---|---|---|---|---|
 | M5.1 | [x] verified | Single-writer transaction state | M4 | begin/commit/rollback, read-your-writes |
 | M5.2 | [x] verified | Double-metapage publication | M4.1,M5.1 | generation selection and commit protocol |
-| M5.3 | [ ] not started | Fault-injection VFS | M2.1 | crash, tear, short I/O, sync simulation |
+| M5.3 | [x] verified | Fault-injection VFS | M2.1 | crash, tear, short I/O, sync simulation |
 | M5.4 | [ ] not started | Exhaustive commit crash matrix | M5.2,M5.3 | old-or-new-state proof by testing |
 | M5.5 | [ ] not started | Recovery/open validation | M5.2 | select valid generation, ignore garbage tail |
 | M5.6 | [ ] not started | Durability modes | M5.4 | explicit full/process contracts |

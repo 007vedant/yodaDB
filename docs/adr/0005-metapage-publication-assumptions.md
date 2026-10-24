@@ -33,6 +33,12 @@ index root before selecting a generation, and failed publication I/O makes the
 handle reject further writes until reopen. This does not close the design
 hypothesis; M5.3 and M5.4 still must exercise every persistence boundary.
 
+M5.3 provides the deterministic crashable VFS needed for that validation. It
+can fail or shorten selected operations, persist only a prefix of a successful
+write, reorder which pending mutations a sync makes durable, and discard all
+remaining unsynced state at a chosen operation boundary. M5.4 remains
+responsible for applying it exhaustively to the publication protocol.
+
 ## Consequences
 
 Recovery has two independent publication candidates and never repairs data
