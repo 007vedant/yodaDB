@@ -14,35 +14,38 @@ optimistic multi-writer validation.
 ## Decision
 
 A persistent database handle permits one active write transaction. Beginning a
-transaction copies the latest committed manifest into a private root set and
-reserves `base TxnID + 1`. Every successful DML statement appends copy-on-write
-pages with that transaction ID and advances only the private roots. Reads in the
-transaction use those private table and index roots. A failed statement leaves
-the preceding private roots active, allowing the caller to correct the error or
-roll back.
+transaction copies the latest committed manifest into a private root set,
+clones the committed catalog, and reserves `base TxnID + 1`. Every successful
+DML or DDL statement appends copy-on-write pages with that transaction ID and
+advances only the private roots and, for DDL, the private catalog. Binding,
+planning, reads, and index maintenance in the transaction use those private
+snapshots. A failed statement leaves the preceding private state active,
+allowing the caller to correct the error or roll back.
 
-Commit publishes the private root set as one manifest. A read-only commit writes
-no manifest. Rollback discards the private roots; already appended pages are
-unreachable garbage. Commit or rollback closes the transaction permanently.
+Commit publishes the private catalog root and table/index roots together in one
+manifest, then promotes the private catalog in memory. A read-only commit writes
+no manifest. Rollback discards the private catalog and roots; already appended
+pages are unreachable garbage. Commit or rollback closes the transaction
+permanently.
 
 The native `Tx` handle owns its transaction. Direct operations on the parent
 `DB` are rejected while that handle is active. SQL `BEGIN` creates a session-
 style transaction whose following `DB` statements run against the private
 roots until SQL `COMMIT` or `ROLLBACK`.
 
-Transactional DDL is rejected until M5.7. Autocommit statements retain their M4
-behavior. For a table without a declared primary key, insertion scans the
-current private table root and allocates one greater than its largest hidden
-positive `INT64` RowID. This is deliberately simple and guarantees distinct
-keys for multiple inserts in one transaction.
+Autocommit statements retain their M4 behavior. For a table without a declared
+primary key, insertion scans the current private table root and allocates one
+greater than its largest hidden positive `INT64` RowID. This is deliberately
+simple and guarantees distinct keys for multiple inserts in one transaction.
 
 ## Consequences
 
-Multiple DML statements have atomic logical visibility and read their own
-writes while committed roots remain unchanged until publication. Constraint or
-type errors do not automatically abort the transaction. Only one writer can be
-prepared at a time, and hidden-RowID allocation is linear in table size; both
-limitations favor inspectable correctness at this stage.
+Multiple DML and DDL statements have atomic logical visibility and read their
+own schema and data changes while committed state remains unchanged until
+publication. Constraint or type errors do not automatically abort the
+transaction. Only one writer can be prepared at a time, and hidden-RowID
+allocation is linear in table size; both limitations favor inspectable
+correctness at this stage.
 
 M5.2 through M5.5 must harden publication and recovery. M6 adds independent
 snapshot readers, and M7 replaces the single active writer rule with optimistic

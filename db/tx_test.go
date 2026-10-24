@@ -92,6 +92,66 @@ func TestTxRollbackLeavesNoReachableWrites(t *testing.T) {
 	}
 }
 
+func TestTxTransactionalDDLCommitsCatalogAndDataTogether(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "transactional-ddl.yoda")
+	database, err := db.Create(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "CREATE TABLE users (id INT64 PRIMARY KEY, email TEXT NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO users VALUES (1, 'ada@example.com')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "CREATE UNIQUE INDEX users_email ON users (email)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO users VALUES (2, 'grace@example.com')"); err != nil {
+		t.Fatal(err)
+	}
+	assertTxStrings(t, tx, "SELECT email FROM users WHERE id = 1", []string{"ada@example.com"})
+	assertTxStrings(t, tx, "EXPLAIN SELECT id FROM users WHERE email = 'grace@example.com'", []string{"INDEX LOOKUP users_email ON users(email)"})
+	if _, err := tx.Exec(ctx, "INSERT INTO users VALUES (3, 'ada@example.com')"); !errors.Is(err, dberrors.ErrConstraint) {
+		t.Fatalf("duplicate error=%v, want constraint", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := manifest.Open(ctx, path, manifest.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := store.LatestManifest()
+	if err != nil || !found {
+		t.Fatalf("latest manifest found=%t error=%v", found, err)
+	}
+	if record.TxnID != 1 {
+		t.Fatalf("transaction ID=%d, want 1 for one atomic DDL/DML commit", record.TxnID)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	assertStrings(t, database, "SELECT email FROM users WHERE id >= 1", []string{"ada@example.com", "grace@example.com"})
+	assertPlan(t, database, "EXPLAIN SELECT id FROM users WHERE email = 'ada@example.com'", "INDEX LOOKUP users_email ON users(email)")
+}
+
 func TestSQLTransactionCommitRollbackAndErrors(t *testing.T) {
 	ctx := context.Background()
 	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "sql-transaction.yoda"))
@@ -108,11 +168,14 @@ func TestSQLTransactionCommitRollbackAndErrors(t *testing.T) {
 		t.Fatalf("duplicate error=%v, want constraint", err)
 	}
 	assertOneInt64(t, database, "SELECT id FROM users WHERE email = 'ada@example.com'", 1)
-	if _, err := database.Exec(ctx, "CREATE TABLE deferred (id INT64)"); !errors.Is(err, dberrors.ErrUnsupported) {
-		t.Fatalf("transactional DDL error=%v, want unsupported", err)
-	}
+	mustExec(t, database, "CREATE TABLE deferred (id INT64)")
+	mustExec(t, database, "INSERT INTO deferred VALUES (10)")
+	assertOneInt64(t, database, "SELECT id FROM deferred", 10)
 	mustExec(t, database, "ROLLBACK")
 	assertNoRow(t, database, "SELECT id FROM users WHERE id = 1")
+	if _, err := database.Query(ctx, "SELECT id FROM deferred"); !errors.Is(err, dberrors.ErrBind) {
+		t.Fatalf("rolled-back table query error=%v, want bind error", err)
+	}
 
 	mustExec(t, database, "BEGIN")
 	mustExec(t, database, "INSERT INTO users VALUES (1, 'ada@example.com')")
@@ -140,12 +203,21 @@ func TestTxCancelledCommitAbortsPrivateState(t *testing.T) {
 	if _, err := tx.Exec(context.Background(), "INSERT INTO users VALUES (1)"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := tx.Exec(context.Background(), "CREATE TABLE pending (id INT64 PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(context.Background(), "INSERT INTO pending VALUES (2)"); err != nil {
+		t.Fatal(err)
+	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := tx.Commit(cancelled); !errors.Is(err, dberrors.ErrCancelled) {
 		t.Fatalf("Commit error=%v, want cancelled", err)
 	}
 	assertNoRow(t, database, "SELECT id FROM users WHERE id = 1")
+	if _, err := database.Query(context.Background(), "SELECT id FROM pending"); !errors.Is(err, dberrors.ErrBind) {
+		t.Fatalf("cancelled DDL query error=%v, want bind error", err)
+	}
 }
 
 func assertTxStrings(t *testing.T, tx *db.Tx, query string, want []string) {

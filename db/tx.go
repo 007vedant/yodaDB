@@ -122,6 +122,7 @@ func (db *DB) beginWriteLocked(owner uint64) error {
 		return err
 	}
 	db.writeTxn = write
+	db.writeCatalog = db.catalog.Clone()
 	db.txOwner = owner
 	return nil
 }
@@ -149,6 +150,9 @@ func (db *DB) commitWriteLocked(ctx context.Context, owner uint64) error {
 	if err := db.writeTxn.CommitSucceeded(); err != nil {
 		db.clearWrite()
 		return err
+	}
+	if dirty {
+		db.catalog = db.writeCatalog
 	}
 	db.clearWrite()
 	return nil
@@ -182,6 +186,7 @@ func (db *DB) requireOwner(owner uint64) error {
 
 func (db *DB) clearWrite() {
 	db.writeTxn = nil
+	db.writeCatalog = nil
 	db.txOwner = 0
 }
 
@@ -194,8 +199,4 @@ func contextError(ctx context.Context, operation string) error {
 
 func txClosed(operation string) error {
 	return dberrors.New(dberrors.CodeTransactionClosed, operation, "transaction is not active")
-}
-
-func transactionalDDLError() error {
-	return dberrors.New(dberrors.CodeUnsupported, "db.ddl", "transactional DDL is deferred until M5.7")
 }

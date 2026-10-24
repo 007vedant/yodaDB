@@ -25,15 +25,16 @@ import (
 // DB is a yodaDB handle backed either by in-memory execution or a persistent
 // page file opened through Create or Open.
 type DB struct {
-	mu       sync.RWMutex
-	closed   bool
-	catalog  *catalog.Catalog
-	engine   *sqlexec.Engine
-	storage  *manifest.Database
-	manifest manifest.Manifest
-	writeTxn *txn.Write
-	txOwner  uint64
-	nextTxID uint64
+	mu           sync.RWMutex
+	closed       bool
+	catalog      *catalog.Catalog
+	engine       *sqlexec.Engine
+	storage      *manifest.Database
+	manifest     manifest.Manifest
+	writeTxn     *txn.Write
+	writeCatalog *catalog.Catalog
+	txOwner      uint64
+	nextTxID     uint64
 }
 
 // Durability is the persistence contract for successful commits.
@@ -204,8 +205,7 @@ func (db *DB) Close() error {
 	defer db.mu.Unlock()
 	if db.writeTxn != nil {
 		_ = db.writeTxn.Rollback()
-		db.writeTxn = nil
-		db.txOwner = 0
+		db.clearWrite()
 	}
 	db.closed = true
 	if db.storage != nil {
@@ -226,7 +226,7 @@ func (db *DB) prepare(sql string, arguments []any) (binder.Statement, error) {
 			return nil, dberrors.Wrap(err, dberrors.CodeType, "db.bind_argument", fmt.Sprintf("argument %d", index+1))
 		}
 	}
-	return binder.Bind(parsed, db.catalog, parameters)
+	return binder.Bind(parsed, db.currentCatalog(), parameters)
 }
 
 func (db *DB) executeBound(ctx context.Context, owner uint64, statement binder.Statement) (Outcome, error) {
@@ -249,14 +249,8 @@ func (db *DB) executeBound(ctx context.Context, owner uint64, statement binder.S
 func (db *DB) executePersistent(ctx context.Context, statement binder.Statement) (Outcome, error) {
 	switch statement := statement.(type) {
 	case *binder.CreateTable:
-		if db.writeTxn != nil {
-			return Outcome{}, transactionalDDLError()
-		}
 		return db.createPersistentTable(ctx, statement)
 	case *binder.CreateIndex:
-		if db.writeTxn != nil {
-			return Outcome{}, transactionalDDLError()
-		}
 		return db.createPersistentIndex(ctx, statement)
 	case *binder.Insert:
 		return db.insertPersistent(ctx, statement)
@@ -267,7 +261,7 @@ func (db *DB) executePersistent(ctx context.Context, statement binder.Statement)
 	case *binder.Delete:
 		return db.deletePersistent(ctx, statement)
 	case *binder.Explain:
-		access := plan.ChooseSelect(statement.Select, db.catalog)
+		access := plan.ChooseSelect(statement.Select, db.currentCatalog())
 		return Outcome{Rows: newRows([]string{"plan"}, []types.Row{{types.Text(access.Description)}})}, nil
 	default:
 		return Outcome{}, dberrors.New(dberrors.CodeUnsupported, "db.execute_persistent", fmt.Sprintf("unsupported statement %T", statement))
@@ -275,7 +269,7 @@ func (db *DB) executePersistent(ctx context.Context, statement binder.Statement)
 }
 
 func (db *DB) createPersistentIndex(ctx context.Context, statement *binder.CreateIndex) (Outcome, error) {
-	nextCatalog := db.catalog.Clone()
+	nextCatalog := db.currentCatalog().Clone()
 	descriptor, err := nextCatalog.CreateIndex(statement.Table.ID, statement.Name, statement.ColumnIDs, statement.Unique)
 	if err != nil {
 		return Outcome{}, err
@@ -293,7 +287,7 @@ func (db *DB) createPersistentIndex(ctx context.Context, statement *binder.Creat
 	if err != nil {
 		return Outcome{}, err
 	}
-	txnID := current.TxnID + 1
+	txnID := db.currentTxnID()
 	indexRoot := page.ID(0)
 	for _, record := range records {
 		indexTree, err := storageindex.Open(db.storage, indexRoot, definition)
@@ -312,33 +306,31 @@ func (db *DB) createPersistentIndex(ctx context.Context, statement *binder.Creat
 	next := db.nextManifest(txnID)
 	next.CatalogRoot = catalogRoot
 	next.IndexRoots[uint64(descriptor.ID)] = indexRoot
-	if err := db.publish(ctx, next); err != nil {
+	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
-	db.catalog = nextCatalog
+	db.setCurrentCatalog(nextCatalog)
 	return Outcome{}, nil
 }
 
 func (db *DB) createPersistentTable(ctx context.Context, statement *binder.CreateTable) (Outcome, error) {
-	nextCatalog := db.catalog.Clone()
+	nextCatalog := db.currentCatalog().Clone()
 	created, err := nextCatalog.CreateTable(statement.Name, statement.Columns)
 	if err != nil {
 		return Outcome{}, err
 	}
-	txnID := db.manifest.TxnID + 1
+	txnID := db.currentTxnID()
 	catalogRoot, err := catalog.Save(ctx, db.storage, txnID, nextCatalog)
 	if err != nil {
 		return Outcome{}, err
 	}
-	next := cloneManifest(db.manifest)
-	next.TxnID, next.ParentTxnID = txnID, db.manifest.TxnID
-	next.CommitUnixNano = time.Now().UnixNano()
+	next := db.nextManifest(txnID)
 	next.CatalogRoot = catalogRoot
 	next.TableRoots[uint64(created.ID)] = 0
-	if err := db.publish(ctx, next); err != nil {
+	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
-	db.catalog = nextCatalog
+	db.setCurrentCatalog(nextCatalog)
 	return Outcome{}, nil
 }
 
@@ -368,7 +360,7 @@ func (db *DB) insertPersistent(ctx context.Context, statement *binder.Insert) (O
 	}
 	next := db.nextManifest(txnID)
 	next.TableRoots[uint64(statement.Table.ID)] = newRoot
-	for _, descriptor := range db.catalog.IndexesForTable(statement.Table.ID) {
+	for _, descriptor := range db.currentCatalog().IndexesForTable(statement.Table.ID) {
 		definition, err := indexDefinition(statement.Table, descriptor)
 		if err != nil {
 			return Outcome{}, err
@@ -459,7 +451,7 @@ func (db *DB) updatePersistent(ctx context.Context, statement *binder.Update) (O
 		if err := validateRow(statement.Table, replacement); err != nil {
 			return Outcome{}, err
 		}
-		for _, descriptor := range db.catalog.IndexesForTable(statement.Table.ID) {
+		for _, descriptor := range db.currentCatalog().IndexesForTable(statement.Table.ID) {
 			root, err := db.deleteIndexEntry(ctx, txnID, statement.Table, descriptor, next.IndexRoots[uint64(descriptor.ID)], record.Row, record.Key)
 			if err != nil {
 				return Outcome{}, err
@@ -479,7 +471,7 @@ func (db *DB) updatePersistent(ctx context.Context, statement *binder.Update) (O
 		if err != nil {
 			return Outcome{}, err
 		}
-		for _, descriptor := range db.catalog.IndexesForTable(statement.Table.ID) {
+		for _, descriptor := range db.currentCatalog().IndexesForTable(statement.Table.ID) {
 			root, err := db.insertIndexEntry(ctx, txnID, statement.Table, descriptor, next.IndexRoots[uint64(descriptor.ID)], replacement, newKey)
 			if err != nil {
 				return Outcome{}, err
@@ -520,7 +512,7 @@ func (db *DB) deletePersistent(ctx context.Context, statement *binder.Delete) (O
 		if !matched {
 			continue
 		}
-		for _, descriptor := range db.catalog.IndexesForTable(statement.Table.ID) {
+		for _, descriptor := range db.currentCatalog().IndexesForTable(statement.Table.ID) {
 			root, err := db.deleteIndexEntry(ctx, txnID, statement.Table, descriptor, next.IndexRoots[uint64(descriptor.ID)], record.Row, record.Key)
 			if err != nil {
 				return Outcome{}, err
@@ -548,7 +540,7 @@ func (db *DB) deletePersistent(ctx context.Context, statement *binder.Delete) (O
 }
 
 func (db *DB) selectRecords(ctx context.Context, statement *binder.Select, tableTree *table.Tree) ([]table.Record, error) {
-	access := plan.ChooseSelect(statement, db.catalog)
+	access := plan.ChooseSelect(statement, db.currentCatalog())
 	switch access.Kind {
 	case plan.PrimaryKeyLookup:
 		key, err := tableTree.EncodePrimaryKey(access.Value)
@@ -629,6 +621,21 @@ func (db *DB) currentManifest() manifest.Manifest {
 		return cloneManifest(db.manifest)
 	}
 	return record
+}
+
+func (db *DB) currentCatalog() *catalog.Catalog {
+	if db.writeTxn != nil && db.writeCatalog != nil {
+		return db.writeCatalog
+	}
+	return db.catalog
+}
+
+func (db *DB) setCurrentCatalog(schema *catalog.Catalog) {
+	if db.writeTxn != nil {
+		db.writeCatalog = schema
+		return
+	}
+	db.catalog = schema
 }
 
 func (db *DB) currentTxnID() uint64 {
