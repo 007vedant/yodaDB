@@ -23,13 +23,15 @@ the database. Multiple handles may pin the same transaction independently.
 Closing a handle releases one reference and is idempotent. Closing the parent
 database invalidates its handles and releases all process-local pins. The
 transaction ID is exposed by `ReadTx.TxnID`; zero denotes the empty database
-before its first commit.
+before its first commit. Snapshot queries take the database's shared lock, so
+multiple readers can execute concurrently. Writers and lifecycle changes take
+the exclusive lock; they may proceed between a long-lived reader's statements
+because a read handle does not hold the lock for its lifetime.
 
 Read transactions are initially available only for persistent databases. Their
 API exposes queries and close, not mutation methods. Immutable committed pages
 mean a later writer can publish new roots without changing the pages reachable
-from an older handle. M6.2 defines the synchronization that permits those reads
-and writes to execute concurrently, and M6.5 makes retention honor the pins.
+from an older handle. M6.5 makes retention honor the pins.
 
 ## Consequences
 

@@ -53,8 +53,8 @@ func (tx *ReadTx) Query(ctx context.Context, sql string, arguments ...any) (*Row
 	if tx == nil || tx.db == nil {
 		return nil, txClosed("read_tx.query")
 	}
-	tx.db.mu.Lock()
-	defer tx.db.mu.Unlock()
+	tx.db.mu.RLock()
+	defer tx.db.mu.RUnlock()
 	if tx.closed || tx.db.closed {
 		return nil, txClosed("read_tx.query")
 	}

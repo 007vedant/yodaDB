@@ -3,7 +3,9 @@ package db_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"yodadb/db"
@@ -83,6 +85,87 @@ func TestBeginReadRejectsInMemoryDatabase(t *testing.T) {
 	if _, err := database.BeginRead(context.Background()); !errors.Is(err, dberrors.ErrUnsupported) {
 		t.Fatalf("BeginRead error=%v, want unsupported", err)
 	}
+}
+
+func TestConcurrentReadersRemainStableWhileWriterCommits(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "reader-writer.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE counter (id INT64 PRIMARY KEY, value INT64 NOT NULL)")
+	mustExec(t, database, "INSERT INTO counter VALUES (1, 0)")
+
+	const readerCount = 4
+	const commits = 50
+	readers := make([]*db.ReadTx, readerCount)
+	for index := range readers {
+		readers[index], err = database.BeginRead(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer readers[index].Close()
+	}
+
+	start := make(chan struct{})
+	errorsFound := make(chan error, readerCount+1)
+	var group sync.WaitGroup
+	for index, reader := range readers {
+		group.Add(1)
+		go func(index int, reader *db.ReadTx) {
+			defer group.Done()
+			<-start
+			for iteration := 0; iteration < commits; iteration++ {
+				value, err := readOneInt64(reader, "SELECT value FROM counter WHERE id = 1")
+				if err != nil {
+					errorsFound <- fmt.Errorf("reader %d iteration %d: %w", index, iteration, err)
+					return
+				}
+				if value != 0 {
+					errorsFound <- fmt.Errorf("reader %d iteration %d saw %d, want snapshot value 0", index, iteration, value)
+					return
+				}
+			}
+		}(index, reader)
+	}
+	group.Add(1)
+	go func() {
+		defer group.Done()
+		<-start
+		for value := int64(1); value <= commits; value++ {
+			if _, err := database.Exec(ctx, "UPDATE counter SET value = ? WHERE id = 1", value); err != nil {
+				errorsFound <- fmt.Errorf("writer value %d: %w", value, err)
+				return
+			}
+		}
+	}()
+	close(start)
+	group.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		t.Error(err)
+	}
+	assertOneInt64(t, database, "SELECT value FROM counter WHERE id = 1", commits)
+}
+
+func readOneInt64(tx *db.ReadTx, query string) (int64, error) {
+	rows, err := tx.Query(context.Background(), query)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return 0, fmt.Errorf("query returned no row: %v", rows.Err())
+	}
+	var value int64
+	if err := rows.Scan(&value); err != nil {
+		return 0, err
+	}
+	if rows.Next() {
+		return 0, fmt.Errorf("query returned more than one row")
+	}
+	return value, rows.Err()
 }
 
 func assertReadStrings(t *testing.T, tx *db.ReadTx, query string, want []string) {
