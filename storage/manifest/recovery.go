@@ -36,6 +36,9 @@ func validateCandidate(file vfs.File, pageCount uint64, candidate Candidate) err
 	}
 	stored, err := readValidatedPage(file, pageCount, meta.LatestManifestPageID)
 	if err != nil {
+		if dberrors.CodeOf(err) == dberrors.CodeIO {
+			return dberrors.Wrap(err, dberrors.CodeIO, "database.validate_candidate", fmt.Sprintf("read manifest page %d", meta.LatestManifestPageID))
+		}
 		return candidateCorruption(candidate, fmt.Sprintf("read manifest page %d: %v", meta.LatestManifestPageID, err))
 	}
 	if stored.Header.Type != page.TypeManifest {
@@ -72,14 +75,20 @@ func validateCandidate(file vfs.File, pageCount uint64, candidate Candidate) err
 		addRoot(root, fmt.Sprintf("index %d", id))
 	}
 	for root, description := range roots {
-		if err := validateTreeRoot(file, pageCount, record.TxnID, root); err != nil {
+		if err := validateTreeRoot(file, pageCount, record.TxnID, meta.LatestManifestPageID, root); err != nil {
+			if dberrors.CodeOf(err) == dberrors.CodeIO {
+				return dberrors.Wrap(err, dberrors.CodeIO, "database.validate_candidate", fmt.Sprintf("read %s root %d", description, root))
+			}
 			return candidateCorruption(candidate, fmt.Sprintf("%s root %d: %v", description, root, err))
 		}
 	}
 	return nil
 }
 
-func validateTreeRoot(file vfs.File, pageCount, txnID uint64, root page.ID) error {
+func validateTreeRoot(file vfs.File, pageCount, txnID uint64, manifestID, root page.ID) error {
+	if root >= manifestID {
+		return fmt.Errorf("page is not before manifest page %d", manifestID)
+	}
 	stored, err := readValidatedPage(file, pageCount, root)
 	if err != nil {
 		return err
@@ -93,20 +102,20 @@ func validateTreeRoot(file vfs.File, pageCount, txnID uint64, root page.ID) erro
 		if err != nil {
 			return err
 		}
-		if leaf.RightSibling != 0 && (leaf.RightSibling < 2 || uint64(leaf.RightSibling) >= pageCount) {
-			return fmt.Errorf("right sibling %d is outside the file", leaf.RightSibling)
+		if leaf.RightSibling != 0 && (leaf.RightSibling < 2 || leaf.RightSibling >= manifestID) {
+			return fmt.Errorf("right sibling %d is not before manifest page %d", leaf.RightSibling, manifestID)
 		}
 	case page.TypeBTreeInternal:
 		internal, err := page.DecodeInternal(stored.Payload)
 		if err != nil {
 			return err
 		}
-		if uint64(internal.FirstChild) >= pageCount {
-			return fmt.Errorf("first child %d is outside the file", internal.FirstChild)
+		if internal.FirstChild >= manifestID {
+			return fmt.Errorf("first child %d is not before manifest page %d", internal.FirstChild, manifestID)
 		}
 		for _, entry := range internal.Entries {
-			if uint64(entry.RightChild) >= pageCount {
-				return fmt.Errorf("right child %d is outside the file", entry.RightChild)
+			if entry.RightChild >= manifestID {
+				return fmt.Errorf("right child %d is not before manifest page %d", entry.RightChild, manifestID)
 			}
 		}
 	default:

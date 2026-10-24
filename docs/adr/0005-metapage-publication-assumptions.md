@@ -49,6 +49,13 @@ validation still determines whether either metapage names a wholly valid
 committed state. This is necessary because a torn append can extend the file by
 less than one page without changing either committed metapage.
 
+M5.5 makes candidate fallback corruption-specific. A read failure is returned as
+I/O instead of being treated as an invalid candidate, preventing a transient
+device error from silently exposing an older generation. Every nonzero root and
+each immediate child or sibling named by its root must precede the candidate's
+manifest page; complete or partial bytes after that manifest are unreachable
+garbage and cannot be pulled into the committed state.
+
 ## Consequences
 
 Recovery has two independent publication candidates and never repairs data

@@ -1,4 +1,3 @@
-// Package manifest owns commit manifests and double-metapage publication.
-// M2 implements empty-database metapage bootstrap; commit manifests arrive in
-// later milestones.
+// Package manifest owns commit manifests, double-metapage publication, and
+// recovery-time selection of a structurally valid committed root set.
 package manifest

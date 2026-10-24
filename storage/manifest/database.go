@@ -145,6 +145,9 @@ func OpenWithVFS(ctx context.Context, filesystem vfs.VFS, path string, options O
 	for slot := page.ID(0); slot < 2; slot++ {
 		buffer := make([]byte, page.Size)
 		if err := readFullAt(file, buffer, int64(slot)*page.Size); err != nil {
+			if dberrors.CodeOf(err) == dberrors.CodeIO {
+				return nil, dberrors.Wrap(err, dberrors.CodeIO, "database.open", fmt.Sprintf("read metapage %d", slot))
+			}
 			candidateErrors = append(candidateErrors, fmt.Errorf("metapage %d: %w", slot, err))
 			continue
 		}
@@ -162,6 +165,9 @@ func OpenWithVFS(ctx context.Context, filesystem vfs.VFS, path string, options O
 	candidates := make([]Candidate, 0, len(decodedCandidates))
 	for _, candidate := range decodedCandidates {
 		if err := validateCandidate(file, pageCount, candidate); err != nil {
+			if dberrors.CodeOf(err) == dberrors.CodeIO {
+				return nil, err
+			}
 			candidateErrors = append(candidateErrors, fmt.Errorf("metapage %d generation %d: %w", candidate.Slot, candidate.Generation, err))
 			continue
 		}
