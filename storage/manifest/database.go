@@ -132,6 +132,10 @@ func OpenWithVFS(ctx context.Context, filesystem vfs.VFS, path string, options O
 	if err != nil {
 		return nil, err
 	}
+	if size%page.Size != 0 {
+		file = &completePagesFile{File: file}
+		size -= size % page.Size
+	}
 	if size < 2*page.Size {
 		return nil, dberrors.New(dberrors.CodeCorruption, "database.open", fmt.Sprintf("file has %d bytes, fewer than two metapages", size))
 	}
@@ -392,11 +396,11 @@ func readFullAt(file vfs.File, buffer []byte, offset int64) error {
 	for read < len(buffer) {
 		count, err := file.ReadAt(buffer[read:], offset+int64(read))
 		read += count
-		if read == len(buffer) {
-			return nil
-		}
 		if err != nil {
 			return err
+		}
+		if read == len(buffer) {
+			return nil
 		}
 		if count == 0 {
 			return io.ErrUnexpectedEOF
@@ -410,11 +414,11 @@ func writeFullAt(file vfs.File, buffer []byte, offset int64) error {
 	for written < len(buffer) {
 		count, err := file.WriteAt(buffer[written:], offset+int64(written))
 		written += count
-		if written == len(buffer) {
-			return nil
-		}
 		if err != nil {
 			return err
+		}
+		if written == len(buffer) {
+			return nil
 		}
 		if count == 0 {
 			return io.ErrShortWrite

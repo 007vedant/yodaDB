@@ -229,6 +229,30 @@ func TestAutomaticCrashAtOperationBoundary(t *testing.T) {
 	}
 }
 
+func TestArmSchedulesFaultsAfterSetup(t *testing.T) {
+	fs := newFS(t, faultvfs.Config{})
+	file := openFile(t, fs, "database", vfs.OpenOptions{Create: true})
+	write(t, file, []byte("durable"), 0)
+	if err := file.Sync(); err != nil {
+		t.Fatalf("setup Sync: %v", err)
+	}
+	if err := fs.Arm(faultvfs.Config{CrashAfter: 1}); err != nil {
+		t.Fatalf("Arm: %v", err)
+	}
+
+	count, err := file.WriteAt([]byte("lost"), 0)
+	if count != 4 || !errors.Is(err, faultvfs.ErrCrash) {
+		t.Fatalf("armed WriteAt = (%d, %v), want (4, ErrCrash)", count, err)
+	}
+	operations := fs.Operations()
+	if len(operations) != 2 || operations[0].Sequence != 1 || operations[0].Kind != faultvfs.Write || operations[1].Kind != faultvfs.Crash {
+		t.Fatalf("armed operations = %+v, want write 1 then crash", operations)
+	}
+	if got := string(fs.Durable("database")); got != "durable" {
+		t.Fatalf("durable bytes = %q, want durable", got)
+	}
+}
+
 func TestLockingAndOpenOptions(t *testing.T) {
 	fs := newFS(t, faultvfs.Config{})
 	first := openFile(t, fs, "database", vfs.OpenOptions{Create: true, Exclusive: true})

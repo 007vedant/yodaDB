@@ -8,6 +8,21 @@ import (
 	"yodadb/storage/vfs"
 )
 
+// completePagesFile hides an incomplete crash tail from the fixed-page pager.
+// Reads and later appends still use the underlying file; Size exposes only the
+// prefix consisting of complete pages.
+type completePagesFile struct {
+	vfs.File
+}
+
+func (f *completePagesFile) Size() (int64, error) {
+	size, err := f.File.Size()
+	if err != nil {
+		return 0, err
+	}
+	return size - size%page.Size, nil
+}
+
 func validateCandidate(file vfs.File, pageCount uint64, candidate Candidate) error {
 	meta := candidate.Meta
 	if meta.LatestTxnID == 0 {

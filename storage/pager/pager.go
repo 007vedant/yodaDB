@@ -240,11 +240,11 @@ func readFullAt(file vfs.File, buffer []byte, offset int64) error {
 	for read < len(buffer) {
 		count, err := file.ReadAt(buffer[read:], offset+int64(read))
 		read += count
-		if read == len(buffer) {
-			return nil
-		}
 		if err != nil {
 			return err
+		}
+		if read == len(buffer) {
+			return nil
 		}
 		if count == 0 {
 			return io.ErrUnexpectedEOF
@@ -258,11 +258,11 @@ func writeFullAt(file vfs.File, buffer []byte, offset int64) error {
 	for written < len(buffer) {
 		count, err := file.WriteAt(buffer[written:], offset+int64(written))
 		written += count
-		if written == len(buffer) {
-			return nil
-		}
 		if err != nil {
 			return err
+		}
+		if written == len(buffer) {
+			return nil
 		}
 		if count == 0 {
 			return io.ErrShortWrite

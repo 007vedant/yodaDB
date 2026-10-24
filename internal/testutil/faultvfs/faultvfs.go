@@ -127,16 +127,20 @@ func New(config Config) (*FS, error) {
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
+	return &FS{
+		config:      cloneConfig(config),
+		files:       make(map[string]*fileState),
+		occurrences: make(map[Kind]int),
+	}, nil
+}
+
+func cloneConfig(config Config) Config {
 	config.Faults = slices.Clone(config.Faults)
 	config.SyncBehaviors = slices.Clone(config.SyncBehaviors)
 	for i := range config.SyncBehaviors {
 		config.SyncBehaviors[i].MutationOrder = slices.Clone(config.SyncBehaviors[i].MutationOrder)
 	}
-	return &FS{
-		config:      config,
-		files:       make(map[string]*fileState),
-		occurrences: make(map[Kind]int),
-	}, nil
+	return config
 }
 
 func validateConfig(config Config) error {
@@ -245,6 +249,21 @@ func (fs *FS) ResetLog() {
 	defer fs.mu.Unlock()
 	fs.operations = nil
 	clear(fs.occurrences)
+}
+
+// Arm replaces the fault schedule and resets operation numbering while
+// preserving files, pending mutations, locks, and open handles. Tests use it
+// immediately before the operation sequence under examination.
+func (fs *FS) Arm(config Config) error {
+	if err := validateConfig(config); err != nil {
+		return err
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.config = cloneConfig(config)
+	fs.operations = nil
+	clear(fs.occurrences)
+	return nil
 }
 
 // Durable returns a copy of bytes that survive a crash.

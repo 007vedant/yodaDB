@@ -36,8 +36,18 @@ hypothesis; M5.3 and M5.4 still must exercise every persistence boundary.
 M5.3 provides the deterministic crashable VFS needed for that validation. It
 can fail or shorten selected operations, persist only a prefix of a successful
 write, reorder which pending mutations a sync makes durable, and discard all
-remaining unsynced state at a chosen operation boundary. M5.4 remains
-responsible for applying it exhaustively to the publication protocol.
+remaining unsynced state at a chosen operation boundary.
+
+M5.4 applies that VFS after every operation in the publication protocol and at
+targeted failed, short, torn, and reordered persistence points. Recovery always
+selects the exact prior manifest and root or the exact new manifest and root;
+it never exposes a mixture.
+
+M5.4 treats a final incomplete page after a crash as unreachable garbage. Open
+exposes only the file's complete-page prefix to the pager, while candidate
+validation still determines whether either metapage names a wholly valid
+committed state. This is necessary because a torn append can extend the file by
+less than one page without changing either committed metapage.
 
 ## Consequences
 
