@@ -58,6 +58,8 @@ const (
 	Or
 	Is
 	As
+	Of
+	Transaction
 	Update
 	Delete
 	Drop
@@ -111,6 +113,8 @@ var kindNames = [...]string{
 	Or:               "OR",
 	Is:               "IS",
 	As:               "AS",
+	Of:               "OF",
+	Transaction:      "TRANSACTION",
 	Update:           "UPDATE",
 	Delete:           "DELETE",
 	Drop:             "DROP",

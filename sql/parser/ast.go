@@ -105,6 +105,7 @@ type SelectStatement struct {
 	Span        lexer.Span
 	Table       Identifier
 	Projections []SelectItem
+	AsOfTxnID   *uint64
 	Where       Expression
 }
 

@@ -142,7 +142,7 @@ func (db *DB) executeSQLLocked(ctx context.Context, owner uint64, sql string, ar
 	if err := db.checkOwner(owner); err != nil {
 		return Outcome{}, err
 	}
-	statement, err := db.prepare(sql, arguments)
+	statement, err := db.prepare(ctx, sql, arguments)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -163,7 +163,7 @@ func (db *DB) execSQLLocked(ctx context.Context, owner uint64, sql string, argum
 	if err := db.checkOwner(owner); err != nil {
 		return Result{}, err
 	}
-	statement, err := db.prepare(sql, arguments)
+	statement, err := db.prepare(ctx, sql, arguments)
 	if err != nil {
 		return Result{}, err
 	}
@@ -188,7 +188,7 @@ func (db *DB) querySQLLocked(ctx context.Context, owner uint64, sql string, argu
 	if err := db.checkOwner(owner); err != nil {
 		return nil, err
 	}
-	statement, err := db.prepare(sql, arguments)
+	statement, err := db.prepare(ctx, sql, arguments)
 	if err != nil {
 		return nil, err
 	}
@@ -216,23 +216,37 @@ func (db *DB) Close() error {
 	return nil
 }
 
-func (db *DB) prepare(sql string, arguments []any) (binder.Statement, error) {
-	return db.prepareWithCatalog(sql, arguments, db.currentCatalog())
-}
-
-func (db *DB) prepareWithCatalog(sql string, arguments []any, schema *catalog.Catalog) (binder.Statement, error) {
-	parsed, err := parser.Parse(sql)
+func (db *DB) prepare(ctx context.Context, sql string, arguments []any) (binder.Statement, error) {
+	parsed, parameters, err := parseSQL(sql, arguments)
 	if err != nil {
 		return nil, err
+	}
+	schema := db.currentCatalog()
+	if txnID := parsedAsOfTxnID(parsed); txnID != nil {
+		if db.storage == nil {
+			return nil, dberrors.New(dberrors.CodeUnsupported, "db.prepare", "AS OF TRANSACTION requires a persistent database")
+		}
+		_, schema, err = db.snapshotByTxnID(ctx, *txnID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return binder.Bind(parsed, schema, parameters)
+}
+
+func parseSQL(sql string, arguments []any) (parser.Statement, []types.Value, error) {
+	parsed, err := parser.Parse(sql)
+	if err != nil {
+		return nil, nil, err
 	}
 	parameters := make([]types.Value, len(arguments))
 	for index, argument := range arguments {
 		parameters[index], err = types.FromGo(argument)
 		if err != nil {
-			return nil, dberrors.Wrap(err, dberrors.CodeType, "db.bind_argument", fmt.Sprintf("argument %d", index+1))
+			return nil, nil, dberrors.Wrap(err, dberrors.CodeType, "db.bind_argument", fmt.Sprintf("argument %d", index+1))
 		}
 	}
-	return binder.Bind(parsed, schema, parameters)
+	return parsed, parameters, nil
 }
 
 func (db *DB) executeBound(ctx context.Context, owner uint64, statement binder.Statement) (Outcome, error) {
@@ -267,7 +281,15 @@ func (db *DB) executePersistent(ctx context.Context, statement binder.Statement)
 	case *binder.Delete:
 		return db.deletePersistent(ctx, statement)
 	case *binder.Explain:
-		access := plan.ChooseSelect(statement.Select, db.currentCatalog())
+		schema := db.currentCatalog()
+		if statement.Select.AsOfTxnID != nil {
+			_, historical, err := db.snapshotByTxnID(ctx, *statement.Select.AsOfTxnID)
+			if err != nil {
+				return Outcome{}, err
+			}
+			schema = historical
+		}
+		access := plan.ChooseSelect(statement.Select, schema)
 		return Outcome{Rows: newRows([]string{"plan"}, []types.Row{{types.Text(access.Description)}})}, nil
 	default:
 		return Outcome{}, dberrors.New(dberrors.CodeUnsupported, "db.execute_persistent", fmt.Sprintf("unsupported statement %T", statement))
@@ -389,7 +411,15 @@ func (db *DB) insertPersistent(ctx context.Context, statement *binder.Insert) (O
 
 func (db *DB) selectPersistent(ctx context.Context, statement *binder.Select) (Outcome, error) {
 	current := db.currentManifest()
-	return db.selectPersistentAt(ctx, statement, current, db.currentCatalog())
+	schema := db.currentCatalog()
+	if statement.AsOfTxnID != nil {
+		var err error
+		current, schema, err = db.snapshotByTxnID(ctx, *statement.AsOfTxnID)
+		if err != nil {
+			return Outcome{}, err
+		}
+	}
+	return db.selectPersistentAt(ctx, statement, current, schema)
 }
 
 func (db *DB) selectPersistentAt(ctx context.Context, statement *binder.Select, current manifest.Manifest, schema *catalog.Catalog) (Outcome, error) {
@@ -630,6 +660,32 @@ func (db *DB) currentManifest() manifest.Manifest {
 		return cloneManifest(db.manifest)
 	}
 	return record
+}
+
+func (db *DB) snapshotByTxnID(ctx context.Context, txnID uint64) (manifest.Manifest, *catalog.Catalog, error) {
+	record, found, err := db.storage.ManifestByTxnID(txnID)
+	if err != nil {
+		return manifest.Manifest{}, nil, err
+	}
+	if !found {
+		return manifest.Manifest{}, nil, dberrors.New(dberrors.CodeConstraint, "db.snapshot", fmt.Sprintf("transaction %d is not retained", txnID))
+	}
+	schema, err := catalog.Load(ctx, db.storage, record.CatalogRoot)
+	if err != nil {
+		return manifest.Manifest{}, nil, err
+	}
+	return record, schema, nil
+}
+
+func parsedAsOfTxnID(statement parser.Statement) *uint64 {
+	switch statement := statement.(type) {
+	case *parser.SelectStatement:
+		return statement.AsOfTxnID
+	case *parser.ExplainStatement:
+		return statement.Select.AsOfTxnID
+	default:
+		return nil
+	}
 }
 
 func (db *DB) currentCatalog() *catalog.Catalog {

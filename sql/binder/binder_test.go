@@ -92,6 +92,17 @@ func TestBindSelectResolvesStarPredicateAndAlias(t *testing.T) {
 	}
 }
 
+func TestBindSelectPreservesHistoricalTransaction(t *testing.T) {
+	bound, err := parseAndBind(t, usersCatalog(t), "SELECT name FROM users AS OF TRANSACTION 9 WHERE id = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := bound.(*binder.Select)
+	if selected.AsOfTxnID == nil || *selected.AsOfTxnID != 9 {
+		t.Fatalf("bound historical SELECT=%#v", selected)
+	}
+}
+
 func TestBindReportsUnknownNamesAndInvalidWhere(t *testing.T) {
 	schema := usersCatalog(t)
 	for _, test := range []struct {

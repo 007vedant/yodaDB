@@ -58,6 +58,7 @@ func (*Insert) boundStatement() {}
 type Select struct {
 	Table       catalog.Table
 	Projections []Projection
+	AsOfTxnID   *uint64
 	Where       *Expression
 }
 
@@ -322,7 +323,15 @@ func (b *binder) bindSelect(statement *parser.SelectStatement) (Statement, error
 			return nil, bindError(statement.Where.SourceSpan(), dberrors.CodeType, fmt.Sprintf("WHERE expression must be BOOL, got %s", where.Type))
 		}
 	}
-	return &Select{Table: table, Projections: projections, Where: where}, nil
+	return &Select{Table: table, Projections: projections, AsOfTxnID: cloneTxnID(statement.AsOfTxnID), Where: where}, nil
+}
+
+func cloneTxnID(txnID *uint64) *uint64 {
+	if txnID == nil {
+		return nil
+	}
+	cloned := *txnID
+	return &cloned
 }
 
 func (b *binder) bindUpdate(statement *parser.UpdateStatement) (Statement, error) {

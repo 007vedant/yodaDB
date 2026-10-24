@@ -58,7 +58,14 @@ func (tx *ReadTx) Query(ctx context.Context, sql string, arguments ...any) (*Row
 	if tx.closed || tx.db.closed {
 		return nil, txClosed("read_tx.query")
 	}
-	statement, err := tx.db.prepareWithCatalog(sql, arguments, tx.catalog)
+	parsed, parameters, err := parseSQL(sql, arguments)
+	if err != nil {
+		return nil, err
+	}
+	if txnID := parsedAsOfTxnID(parsed); txnID != nil && *txnID != tx.snapshot.TxnID {
+		return nil, dberrors.New(dberrors.CodeConstraint, "read_tx.query", fmt.Sprintf("read transaction is bound to transaction %d, not %d", tx.snapshot.TxnID, *txnID))
+	}
+	statement, err := binder.Bind(parsed, tx.catalog, parameters)
 	if err != nil {
 		return nil, err
 	}

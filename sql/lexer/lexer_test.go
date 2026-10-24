@@ -44,12 +44,12 @@ func TestTokenizeDecodesDelimitedValues(t *testing.T) {
 }
 
 func TestTokenizeKeywordsAreASCIIInsensitive(t *testing.T) {
-	tokens, err := lexer.Tokenize("SeLeCt SELECTED")
+	tokens, err := lexer.Tokenize("SeLeCt SELECTED AS OF TRANSACTION")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tokens[0].Kind != lexer.Select || tokens[1].Kind != lexer.Identifier {
-		t.Fatalf("token kinds = %s, %s; want SELECT, identifier", tokens[0].Kind, tokens[1].Kind)
+	if tokens[0].Kind != lexer.Select || tokens[1].Kind != lexer.Identifier || tokens[2].Kind != lexer.As || tokens[3].Kind != lexer.Of || tokens[4].Kind != lexer.Transaction {
+		t.Fatalf("token kinds = %s, %s, %s, %s, %s", tokens[0].Kind, tokens[1].Kind, tokens[2].Kind, tokens[3].Kind, tokens[4].Kind)
 	}
 }
 

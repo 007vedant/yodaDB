@@ -55,6 +55,29 @@ func TestParseSelectPrecedence(t *testing.T) {
 	}
 }
 
+func TestParseSelectAsOfTransaction(t *testing.T) {
+	statement, err := parser.Parse("SELECT name FROM users AS OF TRANSACTION 42 WHERE id = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := statement.(*parser.SelectStatement)
+	if selected.AsOfTxnID == nil || *selected.AsOfTxnID != 42 || selected.Where == nil {
+		t.Fatalf("historical SELECT AST=%#v", selected)
+	}
+
+	explained, err := parser.Parse("EXPLAIN SELECT name FROM users AS OF TRANSACTION 7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if txnID := explained.(*parser.ExplainStatement).Select.AsOfTxnID; txnID == nil || *txnID != 7 {
+		t.Fatalf("historical EXPLAIN AST=%#v", explained)
+	}
+
+	if _, err := parser.Parse("SELECT name FROM users AS OF TRANSACTION 18446744073709551616"); !errors.Is(err, dberrors.ErrSyntax) {
+		t.Fatalf("overflow transaction error=%v, want syntax", err)
+	}
+}
+
 func TestParseDiagnosticsGolden(t *testing.T) {
 	tests := []struct {
 		source string

@@ -252,6 +252,25 @@ func (p *parser) parseSelect() (Statement, error) {
 		return nil, err
 	}
 	end := table.Span.End
+	var asOfTxnID *uint64
+	if p.match(lexer.As) {
+		if _, err := p.expect(lexer.Of, "OF"); err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.Transaction, "TRANSACTION"); err != nil {
+			return nil, err
+		}
+		token, err := p.expect(lexer.Integer, "transaction ID")
+		if err != nil {
+			return nil, err
+		}
+		txnID, err := strconv.ParseUint(token.Value, 10, 64)
+		if err != nil {
+			return nil, p.invalidLiteral(token, "transaction ID")
+		}
+		asOfTxnID = &txnID
+		end = token.Span.End
+	}
 	var where Expression
 	if p.match(lexer.Where) {
 		where, err = p.parseExpression(precedenceLowest)
@@ -260,7 +279,7 @@ func (p *parser) parseSelect() (Statement, error) {
 		}
 		end = where.SourceSpan().End
 	}
-	return &SelectStatement{Span: span(start, end), Table: table, Projections: projections, Where: where}, nil
+	return &SelectStatement{Span: span(start, end), Table: table, Projections: projections, AsOfTxnID: asOfTxnID, Where: where}, nil
 }
 
 func (p *parser) parseUpdate() (Statement, error) {
