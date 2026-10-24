@@ -41,6 +41,14 @@ Transaction IDs are nonzero. A nonzero parent must be lower than its child, and
 the retention boundary cannot exceed the manifest transaction ID. Timestamps
 are informational and are not used for ordering.
 
+Retained history is reconstructed from the metapage-selected latest manifest.
+For each nonzero parent transaction ID, traversal searches backward in physical
+page order and selects the nearest earlier valid manifest with that transaction
+ID. Selecting the nearest instance is important because a failed publication
+may leave an unreachable manifest before a later retry of the same transaction.
+An absent or malformed required predecessor is corruption. Traversal stops
+before a parent older than the selected retention boundary.
+
 ## Consequences
 
 The version-1 page-size limit permits at most 249 total table and index root
@@ -51,6 +59,10 @@ cannot change persisted bytes.
 M4 may publish manifests using a basic single-process path to demonstrate
 persistence. M5 remains responsible for proving the double-metapage commit
 protocol under crashes and torn writes.
+
+Backward discovery is linear in pages in the worst case. This favors retaining
+the version-1 format and proving correct history semantics before adding a
+separate manifest index or parent page ID in a future format version.
 
 ## Alternatives considered
 
