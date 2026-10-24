@@ -125,6 +125,9 @@ func DecodeMetapage(encoded []byte, expectedSlot page.ID) (Candidate, error) {
 	if meta.LatestTxnID == 0 && meta.LatestManifestPageID != 0 {
 		return Candidate{}, corrupt(40, "empty transaction state references a manifest")
 	}
+	if meta.LatestTxnID != 0 && meta.LatestManifestPageID == 0 {
+		return Candidate{}, corrupt(40, "non-empty transaction state does not reference a manifest")
+	}
 	if meta.OldestRetainedTxnID > meta.LatestTxnID {
 		return Candidate{}, corrupt(48, "oldest retained transaction exceeds latest transaction")
 	}

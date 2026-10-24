@@ -27,6 +27,12 @@ validate the required atomicity, ordering, and sync behavior on each supported
 platform. If those assumptions cannot be defended, M5 introduces a small
 checksummed commit journal through a superseding ADR.
 
+M5.2 implements candidate validation and publication ordering: open validates
+the referenced manifest plus the shallow structure of every catalog, table, and
+index root before selecting a generation, and failed publication I/O makes the
+handle reject further writes until reopen. This does not close the design
+hypothesis; M5.3 and M5.4 still must exercise every persistence boundary.
+
 ## Consequences
 
 Recovery has two independent publication candidates and never repairs data

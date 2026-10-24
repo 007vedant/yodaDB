@@ -39,6 +39,13 @@ func TestMetapageRejectsInvalidSemantics(t *testing.T) {
 	if _, err := manifest.DecodeMetapage(encoded, 1); !errors.Is(err, dberrors.ErrCorruption) {
 		t.Fatalf("wrong physical slot error = %v, want corruption", err)
 	}
+	nonEmpty, err := manifest.EncodeMetapage(0, 2, manifest.Meta{FileID: testFileID(), PageSize: page.Size, LatestTxnID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manifest.DecodeMetapage(nonEmpty, 0); !errors.Is(err, dberrors.ErrCorruption) {
+		t.Fatalf("missing manifest error=%v, want corruption", err)
+	}
 }
 
 func TestDecodeMetapageRejectsEveryTruncatedPrefix(t *testing.T) {

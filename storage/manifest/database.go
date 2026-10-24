@@ -27,15 +27,17 @@ type Metadata struct {
 	Generation uint64
 }
 
-// Database is an M2 low-level page-file handle.
+// Database owns the page file, selected committed generation, and publication
+// state.
 type Database struct {
-	mu       sync.Mutex
-	path     string
-	file     vfs.File
-	pager    *pager.Pager
-	metadata Metadata
-	readOnly bool
-	closed   bool
+	mu          sync.Mutex
+	path        string
+	file        vfs.File
+	pager       *pager.Pager
+	metadata    Metadata
+	readOnly    bool
+	closed      bool
+	writeFailed bool
 }
 
 // Create creates and opens a new empty database with the OS VFS.
@@ -134,7 +136,7 @@ func OpenWithVFS(ctx context.Context, filesystem vfs.VFS, path string, options O
 		return nil, dberrors.New(dberrors.CodeCorruption, "database.open", fmt.Sprintf("file has %d bytes, fewer than two metapages", size))
 	}
 
-	candidates := make([]Candidate, 0, 2)
+	decodedCandidates := make([]Candidate, 0, 2)
 	var candidateErrors []error
 	for slot := page.ID(0); slot < 2; slot++ {
 		buffer := make([]byte, page.Size)
@@ -147,10 +149,22 @@ func OpenWithVFS(ctx context.Context, filesystem vfs.VFS, path string, options O
 			candidateErrors = append(candidateErrors, err)
 			continue
 		}
+		decodedCandidates = append(decodedCandidates, candidate)
+	}
+	if len(decodedCandidates) == 0 {
+		return nil, dberrors.Wrap(errors.Join(candidateErrors...), dberrors.CodeCorruption, "database.open", "neither metapage is valid")
+	}
+	pageCount := uint64(size / page.Size)
+	candidates := make([]Candidate, 0, len(decodedCandidates))
+	for _, candidate := range decodedCandidates {
+		if err := validateCandidate(file, pageCount, candidate); err != nil {
+			candidateErrors = append(candidateErrors, fmt.Errorf("metapage %d generation %d: %w", candidate.Slot, candidate.Generation, err))
+			continue
+		}
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
-		return nil, dberrors.Wrap(errors.Join(candidateErrors...), dberrors.CodeCorruption, "database.open", "neither metapage is valid")
+		return nil, dberrors.Wrap(errors.Join(candidateErrors...), dberrors.CodeCorruption, "database.open", "no metapage references a valid committed state")
 	}
 	if len(candidates) == 2 {
 		if candidates[0].Meta.FileID != candidates[1].Meta.FileID || candidates[0].Meta.PageSize != candidates[1].Meta.PageSize {
@@ -222,7 +236,14 @@ func (d *Database) Append(pageType page.Type, generation uint64, payload []byte)
 	if d.readOnly {
 		return 0, dberrors.New(dberrors.CodeConstraint, "database.append", "database is read-only")
 	}
-	return d.pager.Append(pageType, generation, payload)
+	if d.writeFailed {
+		return 0, dberrors.New(dberrors.CodeTransactionClosed, "database.append", "database requires reopen after a failed write")
+	}
+	id, err := d.pager.Append(pageType, generation, payload)
+	if err != nil && dberrors.CodeOf(err) == dberrors.CodeIO {
+		d.writeFailed = true
+	}
+	return id, err
 }
 
 // Sync synchronizes appended pages without publishing a transaction.
@@ -235,7 +256,14 @@ func (d *Database) Sync() error {
 	if d.readOnly {
 		return nil
 	}
-	return d.pager.Sync()
+	if d.writeFailed {
+		return dberrors.New(dberrors.CodeTransactionClosed, "database.sync", "database requires reopen after a failed write")
+	}
+	if err := d.pager.Sync(); err != nil {
+		d.writeFailed = true
+		return err
+	}
+	return nil
 }
 
 // LatestManifest reads the manifest selected by the current metapage. An empty
@@ -269,7 +297,8 @@ func (d *Database) LatestManifest() (Manifest, bool, error) {
 }
 
 // Publish appends and synchronizes a manifest, then publishes it through the
-// older metapage slot. M5 strengthens and fault-tests this commit protocol.
+// older metapage slot. A publication I/O failure rejects later writes until the
+// database is reopened and recovery selects a valid generation.
 func (d *Database) Publish(ctx context.Context, record Manifest) (page.ID, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -279,11 +308,17 @@ func (d *Database) Publish(ctx context.Context, record Manifest) (page.ID, error
 	if d.readOnly {
 		return 0, dberrors.New(dberrors.CodeConstraint, "database.publish", "database is read-only")
 	}
+	if d.writeFailed {
+		return 0, dberrors.New(dberrors.CodeTransactionClosed, "database.publish", "database requires reopen after a failed write")
+	}
 	if err := contextFailure(ctx, "database.publish"); err != nil {
 		return 0, err
 	}
 	if record.TxnID != d.metadata.LatestTxnID+1 || record.ParentTxnID != d.metadata.LatestTxnID {
 		return 0, dberrors.New(dberrors.CodeConflict, "database.publish", "manifest does not extend the selected transaction")
+	}
+	if d.metadata.Generation == ^uint64(0) {
+		return 0, dberrors.New(dberrors.CodeResourceLimit, "database.publish", "metapage generation space is exhausted")
 	}
 	payload, err := EncodeManifest(record)
 	if err != nil {
@@ -291,9 +326,13 @@ func (d *Database) Publish(ctx context.Context, record Manifest) (page.ID, error
 	}
 	manifestID, err := d.pager.Append(page.TypeManifest, record.TxnID, payload)
 	if err != nil {
+		if dberrors.CodeOf(err) == dberrors.CodeIO {
+			d.writeFailed = true
+		}
 		return 0, err
 	}
 	if err := d.pager.Sync(); err != nil {
+		d.writeFailed = true
 		return 0, err
 	}
 	if err := contextFailure(ctx, "database.publish"); err != nil {
@@ -313,9 +352,11 @@ func (d *Database) Publish(ctx context.Context, record Manifest) (page.ID, error
 		return 0, err
 	}
 	if err := writeFullAt(d.file, encoded, int64(target)*page.Size); err != nil {
+		d.writeFailed = true
 		return 0, dberrors.Wrap(err, dberrors.CodeIO, "database.publish", "write metapage")
 	}
 	if err := d.file.Sync(); err != nil {
+		d.writeFailed = true
 		return 0, err
 	}
 	d.metadata = Metadata{Meta: meta, ActiveSlot: target, Generation: generation}
