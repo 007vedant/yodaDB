@@ -109,6 +109,9 @@ func OpenWithOptions(ctx context.Context, path string, options Options) (*DB, er
 	if err != nil {
 		return nil, err
 	}
+	if err := validateCatalogSnapshots(storage, record, schema); err != nil {
+		return nil, err
+	}
 	keep = true
 	return &DB{catalog: schema, storage: storage, manifest: cloneManifest(record)}, nil
 }
@@ -663,6 +666,9 @@ func (db *DB) currentManifest() manifest.Manifest {
 }
 
 func (db *DB) snapshotByTxnID(ctx context.Context, txnID uint64) (manifest.Manifest, *catalog.Catalog, error) {
+	if txnID == 0 {
+		return manifest.Manifest{}, nil, dberrors.New(dberrors.CodeConstraint, "db.snapshot", "transaction ID must be nonzero")
+	}
 	record, found, err := db.storage.ManifestByTxnID(txnID)
 	if err != nil {
 		return manifest.Manifest{}, nil, err

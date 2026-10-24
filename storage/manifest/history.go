@@ -32,8 +32,10 @@ func (d *Database) History() ([]Manifest, error) {
 func (d *Database) ManifestByTxnID(txnID uint64) (record Manifest, found bool, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if txnID == 0 || txnID > d.metadata.LatestTxnID ||
-		(d.metadata.OldestRetainedTxnID != 0 && txnID < d.metadata.OldestRetainedTxnID) {
+	if d.metadata.OldestRetainedTxnID != 0 && txnID < d.metadata.OldestRetainedTxnID {
+		return Manifest{}, false, dberrors.New(dberrors.CodeHistoryNotRetained, "database.manifest_by_txn", fmt.Sprintf("transaction %d is older than retained transaction %d", txnID, d.metadata.OldestRetainedTxnID))
+	}
+	if txnID == 0 || txnID > d.metadata.LatestTxnID {
 		return Manifest{}, false, nil
 	}
 	entries, err := d.historyNewestFirstLocked()

@@ -99,6 +99,37 @@ func TestPersistentCatalogRejectsInvalidInputsAndPageType(t *testing.T) {
 	}
 }
 
+func TestPersistentCatalogRoundTripsNamedSnapshots(t *testing.T) {
+	database, err := manifest.Create(context.Background(), filepath.Join(t.TempDir(), "snapshot-catalog.yoda"), manifest.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	schema := catalog.New()
+	created, err := schema.CreateSnapshot("release-1", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := catalog.Save(context.Background(), database, 1, schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := catalog.Load(context.Background(), database, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found := loaded.LookupSnapshot("release-1")
+	if !found || got != created {
+		t.Fatalf("loaded snapshot=%+v found=%t, want %+v", got, found, created)
+	}
+	if err := loaded.DropSnapshot("release-1"); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots := loaded.Snapshots(); len(snapshots) != 0 {
+		t.Fatalf("snapshots after drop=%+v", snapshots)
+	}
+}
+
 type catalogPageSource map[page.ID]page.Page
 
 func (s catalogPageSource) ReadPage(id page.ID) (page.Page, error) {

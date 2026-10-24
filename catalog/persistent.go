@@ -2,11 +2,13 @@ package catalog
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"sort"
+	"unicode/utf8"
 
 	"yodadb/dberrors"
 	"yodadb/storage/btree"
@@ -18,6 +20,7 @@ const (
 	catalogDescriptorVersion = uint64(1)
 	catalogObjectTable       = int64(1)
 	catalogObjectIndex       = int64(2)
+	catalogObjectSnapshot    = int64(3)
 )
 
 // PageStore is the catalog's narrow boundary to immutable B+ tree storage.
@@ -72,6 +75,24 @@ func Save(ctx context.Context, store PageStore, generation uint64, schema *Catal
 			return 0, err
 		}
 	}
+	for _, snapshot := range schema.Snapshots() {
+		key, err := catalogKey(catalogObjectSnapshot, uint64(snapshot.ID))
+		if err != nil {
+			return 0, err
+		}
+		value, err := encodeSnapshotDescriptor(snapshot)
+		if err != nil {
+			return 0, err
+		}
+		root, err := tree.Insert(ctx, store, generation, key, value)
+		if err != nil {
+			return 0, err
+		}
+		tree, err = btree.Open(store, root)
+		if err != nil {
+			return 0, err
+		}
+	}
 	return tree.Root(), nil
 }
 
@@ -87,6 +108,7 @@ func Load(ctx context.Context, source btree.PageSource, root page.ID) (*Catalog,
 	}
 	var tables []Table
 	var indexes []Index
+	var snapshots []NamedSnapshot
 	for {
 		key, value, err := cursor.Next(ctx)
 		if errors.Is(err, io.EOF) {
@@ -118,11 +140,49 @@ func Load(ctx context.Context, source btree.PageSource, root page.ID) (*Catalog,
 				return nil, catalogCorruption("index key ID does not match descriptor")
 			}
 			indexes = append(indexes, index)
+		case catalogObjectSnapshot:
+			snapshot, err := decodeSnapshotDescriptor(value)
+			if err != nil {
+				return nil, err
+			}
+			if uint64(snapshot.ID) != id {
+				return nil, catalogCorruption("snapshot key ID does not match descriptor")
+			}
+			snapshots = append(snapshots, snapshot)
 		default:
 			return nil, catalogCorruption(fmt.Sprintf("unknown catalog object kind %d", kind))
 		}
 	}
-	return catalogFromDescriptors(tables, indexes)
+	return catalogFromDescriptors(tables, indexes, snapshots)
+}
+
+func encodeSnapshotDescriptor(snapshot NamedSnapshot) ([]byte, error) {
+	txnID := make([]byte, 8)
+	binary.LittleEndian.PutUint64(txnID, snapshot.TxnID)
+	return types.EncodeTuple(catalogDescriptorVersion, types.Row{
+		types.Int64(int64(snapshot.ID)), types.Text(snapshot.Name), types.Bytes(txnID),
+	}, types.TupleLimits{})
+}
+
+func decodeSnapshotDescriptor(encoded []byte) (NamedSnapshot, error) {
+	version, row, err := types.DecodeTuple(encoded, types.TupleLimits{})
+	if err != nil {
+		return NamedSnapshot{}, dberrors.Wrap(err, dberrors.CodeCorruption, "catalog.decode_snapshot", "invalid snapshot descriptor tuple")
+	}
+	if version != catalogDescriptorVersion || len(row) != 3 {
+		return NamedSnapshot{}, catalogCorruption("invalid snapshot descriptor header")
+	}
+	id, idOK := positiveInt(row[0])
+	name, nameOK := row[1].TextValue()
+	txnID, txnOK := row[2].BytesValue()
+	if !idOK || !nameOK || name == "" || len(name) > 255 || !txnOK || len(txnID) != 8 {
+		return NamedSnapshot{}, catalogCorruption("invalid snapshot descriptor fields")
+	}
+	target := binary.LittleEndian.Uint64(txnID)
+	if target == 0 {
+		return NamedSnapshot{}, catalogCorruption("snapshot transaction ID must be nonzero")
+	}
+	return NamedSnapshot{ID: SnapshotID(id), Name: name, TxnID: target}, nil
 }
 
 func catalogKey(kind int64, id uint64) ([]byte, error) {
@@ -234,7 +294,7 @@ func decodeIndexDescriptor(encoded []byte) (Index, error) {
 	return index, nil
 }
 
-func catalogFromDescriptors(tables []Table, indexes []Index) (*Catalog, error) {
+func catalogFromDescriptors(tables []Table, indexes []Index, snapshots []NamedSnapshot) (*Catalog, error) {
 	schema := New()
 	sort.Slice(tables, func(left, right int) bool { return tables[left].ID < tables[right].ID })
 	for _, table := range tables {
@@ -248,7 +308,31 @@ func catalogFromDescriptors(tables []Table, indexes []Index) (*Catalog, error) {
 			return nil, err
 		}
 	}
+	sort.Slice(snapshots, func(left, right int) bool { return snapshots[left].ID < snapshots[right].ID })
+	for _, snapshot := range snapshots {
+		if err := schema.installSnapshot(snapshot); err != nil {
+			return nil, err
+		}
+	}
 	return schema, nil
+}
+
+func (c *Catalog) installSnapshot(snapshot NamedSnapshot) error {
+	if snapshot.ID == 0 || snapshot.Name == "" || len(snapshot.Name) > 255 || !utf8.ValidString(snapshot.Name) || snapshot.TxnID == 0 {
+		return catalogCorruption("invalid persisted snapshot descriptor")
+	}
+	if _, duplicate := c.snapshots[snapshot.ID]; duplicate {
+		return catalogCorruption("duplicate persisted snapshot ID")
+	}
+	if _, duplicate := c.snapshotNames[snapshot.Name]; duplicate {
+		return catalogCorruption("duplicate persisted snapshot name")
+	}
+	c.snapshots[snapshot.ID] = snapshot
+	c.snapshotNames[snapshot.Name] = snapshot.ID
+	if snapshot.ID >= c.nextSnapshotID {
+		c.nextSnapshotID = snapshot.ID + 1
+	}
+	return nil
 }
 
 func (c *Catalog) installTable(table Table) error {

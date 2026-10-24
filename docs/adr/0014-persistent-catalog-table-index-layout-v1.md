@@ -16,10 +16,13 @@ All three structures use the immutable B+ tree and the version-1 key and tuple
 codecs fixed by ADRs 0009 and 0010.
 
 Catalog entries use the composite key `(object-kind INT64, stable-id INT64)`.
-Object kind `1` is a table and kind `2` is an index. Descriptor values are
-version-1 tuples. A table descriptor stores its stable ID, name, schema version,
-primary-key ordinal, and ordered column descriptors. An index descriptor stores
-its stable ID, name, table ID, uniqueness flag, and ordered stable column IDs.
+Object kind `1` is a table, kind `2` is an index, and kind `3` is a durable
+named snapshot. Descriptor values are version-1 tuples. A table descriptor
+stores its stable ID, name, schema version, primary-key ordinal, and ordered
+column descriptors. An index descriptor stores its stable ID, name, table ID,
+uniqueness flag, and ordered stable column IDs. A snapshot descriptor stores its
+stable ID, exact case-sensitive UTF-8 name, and target transaction ID encoded as
+eight little-endian bytes.
 
 Table values are versioned row tuples. A table with a declared primary key uses
 that scalar's canonical key encoding as its physical key. A table without one
@@ -39,6 +42,10 @@ Manifest publication makes table and every affected index root visible
 together; pages appended by a failed constraint check remain unreachable.
 Changing any descriptor field order, object-kind value, table-key rule, or
 secondary-index suffix rule requires a new format version and migration plan.
+
+Named snapshots live in the catalog so creating or dropping one is published
+atomically like other metadata and survives reopen without adding another
+manifest root. Older catalogs without kind `3` entries remain readable.
 
 The transaction-derived hidden RowID is sufficient while M4 publishes each
 INSERT separately. Starting in M5.1, ADR 0015 allocates from the largest hidden

@@ -3,6 +3,7 @@ package catalog
 import (
 	"fmt"
 	"sync"
+	"unicode/utf8"
 
 	"yodadb/dberrors"
 	"yodadb/types"
@@ -16,6 +17,9 @@ type ColumnID uint64
 
 // IndexID is a stable secondary-index identity independent of its name.
 type IndexID uint64
+
+// SnapshotID is a stable identity for a durable named snapshot.
+type SnapshotID uint64
 
 // Column describes one table column.
 type Column struct {
@@ -46,6 +50,13 @@ type Index struct {
 	Unique  bool
 }
 
+// NamedSnapshot is a durable name that pins one committed transaction.
+type NamedSnapshot struct {
+	ID    SnapshotID
+	Name  string
+	TxnID uint64
+}
+
 // ColumnSpec contains validated-independent input for creating a column.
 type ColumnSpec struct {
 	Name       string
@@ -56,27 +67,96 @@ type ColumnSpec struct {
 
 // Catalog is the M1 in-memory schema catalog.
 type Catalog struct {
-	mu           sync.RWMutex
-	nextTableID  TableID
-	nextColumnID ColumnID
-	nextIndexID  IndexID
-	tableNames   map[string]TableID
-	tables       map[TableID]Table
-	indexNames   map[TableID]map[string]IndexID
-	indexes      map[IndexID]Index
+	mu             sync.RWMutex
+	nextTableID    TableID
+	nextColumnID   ColumnID
+	nextIndexID    IndexID
+	nextSnapshotID SnapshotID
+	tableNames     map[string]TableID
+	tables         map[TableID]Table
+	indexNames     map[TableID]map[string]IndexID
+	indexes        map[IndexID]Index
+	snapshotNames  map[string]SnapshotID
+	snapshots      map[SnapshotID]NamedSnapshot
 }
 
 // New creates an empty catalog.
 func New() *Catalog {
 	return &Catalog{
-		nextTableID:  1,
-		nextColumnID: 1,
-		nextIndexID:  1,
-		tableNames:   make(map[string]TableID),
-		tables:       make(map[TableID]Table),
-		indexNames:   make(map[TableID]map[string]IndexID),
-		indexes:      make(map[IndexID]Index),
+		nextTableID:    1,
+		nextColumnID:   1,
+		nextIndexID:    1,
+		nextSnapshotID: 1,
+		tableNames:     make(map[string]TableID),
+		tables:         make(map[TableID]Table),
+		indexNames:     make(map[TableID]map[string]IndexID),
+		indexes:        make(map[IndexID]Index),
+		snapshotNames:  make(map[string]SnapshotID),
+		snapshots:      make(map[SnapshotID]NamedSnapshot),
 	}
+}
+
+// CreateSnapshot creates a durable name for an exact committed transaction.
+func (c *Catalog) CreateSnapshot(name string, txnID uint64) (NamedSnapshot, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if name == "" || !utf8.ValidString(name) {
+		return NamedSnapshot{}, dberrors.New(dberrors.CodeConstraint, "catalog.create_snapshot", "snapshot name must be non-empty UTF-8")
+	}
+	if len(name) > 255 {
+		return NamedSnapshot{}, dberrors.New(dberrors.CodeResourceLimit, "catalog.create_snapshot", "snapshot name exceeds 255 bytes")
+	}
+	if txnID == 0 {
+		return NamedSnapshot{}, dberrors.New(dberrors.CodeConstraint, "catalog.create_snapshot", "snapshot transaction ID must be nonzero")
+	}
+	if _, exists := c.snapshotNames[name]; exists {
+		return NamedSnapshot{}, dberrors.New(dberrors.CodeConstraint, "catalog.create_snapshot", fmt.Sprintf("snapshot %q already exists", name))
+	}
+	if c.nextSnapshotID == 0 {
+		return NamedSnapshot{}, dberrors.New(dberrors.CodeResourceLimit, "catalog.create_snapshot", "snapshot ID space is exhausted")
+	}
+	snapshot := NamedSnapshot{ID: c.nextSnapshotID, Name: name, TxnID: txnID}
+	c.nextSnapshotID++
+	c.snapshotNames[name] = snapshot.ID
+	c.snapshots[snapshot.ID] = snapshot
+	return snapshot, nil
+}
+
+// DropSnapshot removes a named snapshot without changing its target history.
+func (c *Catalog) DropSnapshot(name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	id, exists := c.snapshotNames[name]
+	if !exists {
+		return dberrors.New(dberrors.CodeConstraint, "catalog.drop_snapshot", fmt.Sprintf("unknown snapshot %q", name))
+	}
+	delete(c.snapshotNames, name)
+	delete(c.snapshots, id)
+	return nil
+}
+
+// LookupSnapshot resolves an exact, case-sensitive snapshot name.
+func (c *Catalog) LookupSnapshot(name string) (NamedSnapshot, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	id, ok := c.snapshotNames[name]
+	if !ok {
+		return NamedSnapshot{}, false
+	}
+	return c.snapshots[id], true
+}
+
+// Snapshots returns named snapshots ordered by stable snapshot ID.
+func (c *Catalog) Snapshots() []NamedSnapshot {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	result := make([]NamedSnapshot, 0, len(c.snapshots))
+	for id := SnapshotID(1); id < c.nextSnapshotID; id++ {
+		if snapshot, ok := c.snapshots[id]; ok {
+			result = append(result, snapshot)
+		}
+	}
+	return result
 }
 
 // CreateIndex atomically creates an index descriptor after validating its
@@ -278,6 +358,7 @@ func (c *Catalog) Clone() *Catalog {
 	cloned.nextTableID = c.nextTableID
 	cloned.nextColumnID = c.nextColumnID
 	cloned.nextIndexID = c.nextIndexID
+	cloned.nextSnapshotID = c.nextSnapshotID
 	for name, id := range c.tableNames {
 		cloned.tableNames[name] = id
 	}
@@ -292,6 +373,12 @@ func (c *Catalog) Clone() *Catalog {
 	}
 	for id, index := range c.indexes {
 		cloned.indexes[id] = cloneIndex(index)
+	}
+	for name, id := range c.snapshotNames {
+		cloned.snapshotNames[name] = id
+	}
+	for id, snapshot := range c.snapshots {
+		cloned.snapshots[id] = snapshot
 	}
 	return cloned
 }

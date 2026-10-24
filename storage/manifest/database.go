@@ -346,6 +346,9 @@ func (d *Database) Publish(ctx context.Context, record Manifest) (page.ID, error
 	if record.TxnID != d.metadata.LatestTxnID+1 || record.ParentTxnID != d.metadata.LatestTxnID {
 		return 0, dberrors.New(dberrors.CodeConflict, "database.publish", "manifest does not extend the selected transaction")
 	}
+	if d.metadata.OldestRetainedTxnID != 0 && record.OldestRetainedTxnID < d.metadata.OldestRetainedTxnID {
+		return 0, dberrors.New(dberrors.CodeHistoryNotRetained, "database.publish", "retained-history boundary cannot move backward")
+	}
 	if d.metadata.Generation == ^uint64(0) {
 		return 0, dberrors.New(dberrors.CodeResourceLimit, "database.publish", "metapage generation space is exhausted")
 	}

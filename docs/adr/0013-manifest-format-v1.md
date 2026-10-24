@@ -49,6 +49,10 @@ may leave an unreachable manifest before a later retry of the same transaction.
 An absent or malformed required predecessor is corruption. Traversal stops
 before a parent older than the selected retention boundary.
 
+The retention boundary is monotonic once nonzero. Zero means that no logical
+history has yet been discarded; after advancement, a later manifest cannot
+lower it or return it to zero.
+
 ## Consequences
 
 The version-1 page-size limit permits at most 249 total table and index root

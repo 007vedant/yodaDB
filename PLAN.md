@@ -937,7 +937,7 @@ Status: **in progress**
 | M6.2 | [x] verified | Concurrent readers + writer | M6.1 | synchronization with race tests |
 | M6.3 | [x] verified | Manifest history traversal | M4.1,M6.1 | exact lookup by transaction ID |
 | M6.4 | [x] verified | Historical SQL binding | M6.3,M4 | `AS OF TRANSACTION` |
-| M6.5 | [ ] not started | Retention and named snapshots | M6.3 | pin/drop policy and errors |
+| M6.5 | [x] verified | Retention and named snapshots | M6.3 | pin/drop policy and errors |
 | M6.6 | [ ] not started | History diagnostics | M6.3 | CLI listing and root summaries |
 
 Gate:

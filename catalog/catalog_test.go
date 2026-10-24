@@ -84,3 +84,27 @@ func TestCreateRejectsDuplicateTableAndMultiplePrimaryKeys(t *testing.T) {
 		t.Fatalf("multiple-key error = %v, want constraint", err)
 	}
 }
+
+func TestNamedSnapshotLifecycleAndClone(t *testing.T) {
+	schema := catalog.New()
+	created, err := schema.CreateSnapshot("before-migration", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != 1 || created.TxnID != 7 {
+		t.Fatalf("created snapshot=%+v", created)
+	}
+	if _, err := schema.CreateSnapshot("before-migration", 8); !errors.Is(err, dberrors.ErrConstraint) {
+		t.Fatalf("duplicate snapshot error=%v, want constraint", err)
+	}
+	cloned := schema.Clone()
+	if err := schema.DropSnapshot("before-migration"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := schema.LookupSnapshot("before-migration"); found {
+		t.Fatal("dropped snapshot remains in source catalog")
+	}
+	if snapshot, found := cloned.LookupSnapshot("before-migration"); !found || snapshot.TxnID != 7 {
+		t.Fatalf("clone snapshot=%+v found=%t", snapshot, found)
+	}
+}

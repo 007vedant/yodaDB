@@ -2,9 +2,11 @@ package manifest_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
+	"yodadb/dberrors"
 	"yodadb/storage/manifest"
 	"yodadb/storage/page"
 )
@@ -140,5 +142,43 @@ func TestManifestHistorySurvivesReopen(t *testing.T) {
 	}
 	if len(history) != 2 || history[0].TxnID != 1 || history[1].TxnID != 2 {
 		t.Fatalf("history after reopen=%+v", history)
+	}
+}
+
+func TestManifestRetentionBoundaryHidesOlderHistoryAndNeverMovesBackward(t *testing.T) {
+	database, err := manifest.Create(context.Background(), filepath.Join(t.TempDir(), "retained-history.yoda"), manifest.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for txnID := uint64(1); txnID <= 2; txnID++ {
+		if _, err := database.Publish(context.Background(), manifest.Manifest{
+			TxnID: txnID, ParentTxnID: txnID - 1,
+			TableRoots: map[uint64]page.ID{}, IndexRoots: map[uint64]page.ID{},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.Publish(context.Background(), manifest.Manifest{
+		TxnID: 3, ParentTxnID: 2, OldestRetainedTxnID: 2,
+		TableRoots: map[uint64]page.ID{}, IndexRoots: map[uint64]page.ID{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	history, err := database.History()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 || history[0].TxnID != 2 || history[1].TxnID != 3 {
+		t.Fatalf("retained history=%+v", history)
+	}
+	if _, found, err := database.ManifestByTxnID(1); !errors.Is(err, dberrors.ErrHistoryNotRetained) || found {
+		t.Fatalf("ManifestByTxnID(1) found=%t error=%v", found, err)
+	}
+	if _, err := database.Publish(context.Background(), manifest.Manifest{
+		TxnID: 4, ParentTxnID: 3, OldestRetainedTxnID: 1,
+		TableRoots: map[uint64]page.ID{}, IndexRoots: map[uint64]page.ID{},
+	}); !errors.Is(err, dberrors.ErrHistoryNotRetained) {
+		t.Fatalf("backward retention error=%v, want history not retained", err)
 	}
 }

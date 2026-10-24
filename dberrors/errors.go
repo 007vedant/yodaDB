@@ -38,6 +38,9 @@ const (
 	CodeCorruption Code = "corruption"
 	// CodeResourceLimit identifies a configured resource limit violation.
 	CodeResourceLimit Code = "resource_limit"
+	// CodeHistoryNotRetained identifies a requested transaction older than the
+	// database's retained-history boundary.
+	CodeHistoryNotRetained Code = "history_not_retained"
 )
 
 type categoryError Code
@@ -48,18 +51,19 @@ func (e categoryError) Error() string {
 
 // Category sentinels support errors.Is without discarding detailed context.
 var (
-	ErrUnknown           error = categoryError(CodeUnknown)
-	ErrSyntax            error = categoryError(CodeSyntax)
-	ErrBind              error = categoryError(CodeBind)
-	ErrType              error = categoryError(CodeType)
-	ErrConstraint        error = categoryError(CodeConstraint)
-	ErrConflict          error = categoryError(CodeConflict)
-	ErrTransactionClosed error = categoryError(CodeTransactionClosed)
-	ErrCancelled         error = categoryError(CodeCancelled)
-	ErrUnsupported       error = categoryError(CodeUnsupported)
-	ErrIO                error = categoryError(CodeIO)
-	ErrCorruption        error = categoryError(CodeCorruption)
-	ErrResourceLimit     error = categoryError(CodeResourceLimit)
+	ErrUnknown            error = categoryError(CodeUnknown)
+	ErrSyntax             error = categoryError(CodeSyntax)
+	ErrBind               error = categoryError(CodeBind)
+	ErrType               error = categoryError(CodeType)
+	ErrConstraint         error = categoryError(CodeConstraint)
+	ErrConflict           error = categoryError(CodeConflict)
+	ErrTransactionClosed  error = categoryError(CodeTransactionClosed)
+	ErrCancelled          error = categoryError(CodeCancelled)
+	ErrUnsupported        error = categoryError(CodeUnsupported)
+	ErrIO                 error = categoryError(CodeIO)
+	ErrCorruption         error = categoryError(CodeCorruption)
+	ErrResourceLimit      error = categoryError(CodeResourceLimit)
+	ErrHistoryNotRetained error = categoryError(CodeHistoryNotRetained)
 )
 
 // Error adds a stable category and operation context to an error.
