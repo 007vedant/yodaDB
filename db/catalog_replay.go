@@ -100,9 +100,9 @@ func (db *DB) isLocallyCreatedIndex(indexID catalog.IndexID) bool {
 	return false
 }
 
-func (db *DB) replayTransaction(ctx context.Context, catalogMutations []catalogMutation, rowMutations []rowMutation) (manifest.Manifest, *catalog.Catalog, error) {
+func (db *DB) replayTransaction(ctx context.Context, catalogMutations []catalogMutation, rowMutations []rowMutation) (manifest.Manifest, *catalog.Catalog, map[catalog.TableID]catalog.TableID, error) {
 	if db.manifest.TxnID == ^uint64(0) {
-		return manifest.Manifest{}, nil, dberrors.New(dberrors.CodeResourceLimit, "db.replay", "transaction ID space is exhausted")
+		return manifest.Manifest{}, nil, nil, dberrors.New(dberrors.CodeResourceLimit, "db.replay", "transaction ID space is exhausted")
 	}
 	next := cloneManifest(db.manifest)
 	next.TxnID = db.manifest.TxnID + 1
@@ -116,7 +116,7 @@ func (db *DB) replayTransaction(ctx context.Context, catalogMutations []catalogM
 		case catalogCreateTable:
 			created, err := schema.CreateTable(mutation.name, mutation.columns)
 			if err != nil {
-				return manifest.Manifest{}, nil, dberrors.Wrap(err, dberrors.CodeConflict, "db.replay_catalog", fmt.Sprintf("create table %q conflicts with latest catalog", mutation.name))
+				return manifest.Manifest{}, nil, nil, dberrors.Wrap(err, dberrors.CodeConflict, "db.replay_catalog", fmt.Sprintf("create table %q conflicts with latest catalog", mutation.name))
 			}
 			tableIDs[mutation.tableID] = created.ID
 			next.TableRoots[uint64(created.ID)] = 0
@@ -128,43 +128,43 @@ func (db *DB) replayTransaction(ctx context.Context, catalogMutations []catalogM
 			}
 			tableDescriptor, found := schema.TableByID(tableID)
 			if !found {
-				return manifest.Manifest{}, nil, dberrors.New(dberrors.CodeConflict, "db.replay_catalog", fmt.Sprintf("table %d for index %q no longer exists", tableID, mutation.name))
+				return manifest.Manifest{}, nil, nil, dberrors.New(dberrors.CodeConflict, "db.replay_catalog", fmt.Sprintf("table %d for index %q no longer exists", tableID, mutation.name))
 			}
 			columnIDs := make([]catalog.ColumnID, len(mutation.ordinals))
 			for index, ordinal := range mutation.ordinals {
 				if ordinal < 0 || ordinal >= len(tableDescriptor.Columns) {
-					return manifest.Manifest{}, nil, dberrors.New(dberrors.CodeConflict, "db.replay_catalog", fmt.Sprintf("column %d for index %q no longer exists", ordinal, mutation.name))
+					return manifest.Manifest{}, nil, nil, dberrors.New(dberrors.CodeConflict, "db.replay_catalog", fmt.Sprintf("column %d for index %q no longer exists", ordinal, mutation.name))
 				}
 				columnIDs[index] = tableDescriptor.Columns[ordinal].ID
 			}
 			created, err := schema.CreateIndex(tableID, mutation.name, columnIDs, mutation.unique)
 			if err != nil {
-				return manifest.Manifest{}, nil, dberrors.Wrap(err, dberrors.CodeConflict, "db.replay_catalog", fmt.Sprintf("create index %q conflicts with latest catalog", mutation.name))
+				return manifest.Manifest{}, nil, nil, dberrors.Wrap(err, dberrors.CodeConflict, "db.replay_catalog", fmt.Sprintf("create index %q conflicts with latest catalog", mutation.name))
 			}
 			root, err := db.buildIndexAt(ctx, next.TxnID, next, tableDescriptor, created)
 			if err != nil {
-				return manifest.Manifest{}, nil, dberrors.Wrap(err, dberrors.CodeConflict, "db.replay_catalog", fmt.Sprintf("build index %q against latest rows", mutation.name))
+				return manifest.Manifest{}, nil, nil, dberrors.Wrap(err, dberrors.CodeConflict, "db.replay_catalog", fmt.Sprintf("build index %q against latest rows", mutation.name))
 			}
 			next.IndexRoots[uint64(created.ID)] = root
 
 		default:
-			return manifest.Manifest{}, nil, dberrors.New(dberrors.CodeConflict, "db.replay_catalog", "unknown catalog mutation")
+			return manifest.Manifest{}, nil, nil, dberrors.New(dberrors.CodeConflict, "db.replay_catalog", "unknown catalog mutation")
 		}
 	}
 
 	var err error
 	next, err = db.replayRowMutationsOnto(ctx, next, schema, tableIDs, rowMutations)
 	if err != nil {
-		return manifest.Manifest{}, nil, err
+		return manifest.Manifest{}, nil, nil, err
 	}
 	if len(catalogMutations) != 0 {
 		root, err := catalog.Save(ctx, db.storage, next.TxnID, schema)
 		if err != nil {
-			return manifest.Manifest{}, nil, err
+			return manifest.Manifest{}, nil, nil, err
 		}
 		next.CatalogRoot = root
 	}
-	return next, schema, nil
+	return next, schema, tableIDs, nil
 }
 
 func (db *DB) buildIndexAt(ctx context.Context, txnID uint64, current manifest.Manifest, tableDescriptor catalog.Table, descriptor catalog.Index) (page.ID, error) {

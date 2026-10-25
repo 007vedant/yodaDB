@@ -977,7 +977,11 @@ func isQuery(statement binder.Statement) bool {
 }
 
 func (db *DB) publish(ctx context.Context, next manifest.Manifest) error {
-	err := db.publishWithFootprint(ctx, next, &db.writeFootprint)
+	prepared, err := db.appendChangeMutations(ctx, next, db.currentCatalog(), nil, db.writeMutations)
+	if err != nil {
+		return err
+	}
+	err = db.publishWithFootprint(ctx, prepared, &db.writeFootprint)
 	if err == nil {
 		db.writeFootprint = txn.Footprint{}
 		db.writeMutations = nil

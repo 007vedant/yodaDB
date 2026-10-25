@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"yodadb/catalog"
 	"yodadb/dberrors"
 	"yodadb/sql/binder"
 	"yodadb/sql/parser"
@@ -134,6 +135,7 @@ func (tx *Tx) Commit(ctx context.Context) error {
 	}
 	rebased := false
 	rebasedCatalog := tx.db.catalog
+	var tableIDs map[catalog.TableID]catalog.TableID
 	if dirty {
 		baseTxnID := record.ParentTxnID
 		validation, err := tx.db.commitCoordinator().Validate(baseTxnID, &tx.work.writeFootprint)
@@ -148,7 +150,7 @@ func (tx *Tx) Commit(ctx context.Context) error {
 			return newConflictError(ConflictWriteWrite, "tx.commit", baseTxnID, validation.LatestTxnID, validation.Conflicts, nil)
 		}
 		if validation.LatestTxnID != baseTxnID {
-			record, rebasedCatalog, err = tx.db.replayTransaction(ctx, tx.work.catalogMutations, tx.work.writeMutations)
+			record, rebasedCatalog, tableIDs, err = tx.db.replayTransaction(ctx, tx.work.catalogMutations, tx.work.writeMutations)
 			if err != nil {
 				tx.work.writeTxn.CommitFailed()
 				tx.db.closeNativeWriteLocked(tx)
@@ -158,6 +160,16 @@ func (tx *Tx) Commit(ctx context.Context) error {
 		}
 	}
 	if dirty {
+		changeCatalog := tx.work.writeCatalog
+		if rebased {
+			changeCatalog = rebasedCatalog
+		}
+		record, err = tx.db.appendChangeMutations(ctx, record, changeCatalog, tableIDs, tx.work.writeMutations)
+		if err != nil {
+			tx.work.writeTxn.CommitFailed()
+			tx.db.closeNativeWriteLocked(tx)
+			return err
+		}
 		if err := tx.db.publishWithFootprint(ctx, record, &tx.work.writeFootprint); err != nil {
 			tx.work.writeTxn.CommitFailed()
 			tx.db.closeNativeWriteLocked(tx)
@@ -251,6 +263,7 @@ func (db *DB) commitWriteLocked(ctx context.Context, owner uint64) error {
 	}
 	rebased := false
 	rebasedCatalog := db.catalog
+	var tableIDs map[catalog.TableID]catalog.TableID
 	if dirty {
 		baseTxnID := record.ParentTxnID
 		validation, err := db.commitCoordinator().Validate(baseTxnID, &db.writeFootprint)
@@ -265,7 +278,7 @@ func (db *DB) commitWriteLocked(ctx context.Context, owner uint64) error {
 			return newConflictError(ConflictWriteWrite, "db.commit", baseTxnID, validation.LatestTxnID, validation.Conflicts, nil)
 		}
 		if validation.LatestTxnID != baseTxnID {
-			record, rebasedCatalog, err = db.replayTransaction(ctx, db.catalogMutations, db.writeMutations)
+			record, rebasedCatalog, tableIDs, err = db.replayTransaction(ctx, db.catalogMutations, db.writeMutations)
 			if err != nil {
 				db.writeTxn.CommitFailed()
 				db.clearWrite()
@@ -275,7 +288,17 @@ func (db *DB) commitWriteLocked(ctx context.Context, owner uint64) error {
 		}
 	}
 	if dirty {
-		if err := db.publish(ctx, record); err != nil {
+		changeCatalog := db.writeCatalog
+		if rebased {
+			changeCatalog = rebasedCatalog
+		}
+		record, err = db.appendChangeMutations(ctx, record, changeCatalog, tableIDs, db.writeMutations)
+		if err != nil {
+			db.writeTxn.CommitFailed()
+			db.clearWrite()
+			return err
+		}
+		if err := db.publishWithFootprint(ctx, record, &db.writeFootprint); err != nil {
 			db.writeTxn.CommitFailed()
 			db.clearWrite()
 			return err

@@ -1,2 +1,2 @@
-// Package changefeed will expose durable logical database changes.
+// Package changefeed encodes and stores durable logical database changes.
 package changefeed

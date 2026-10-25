@@ -975,14 +975,16 @@ Gate:
 
 Outcome: version history becomes a useful product feature.
 
-| ID | Task | Depends on | Deliverable |
-|---|---|---|---|
-| M8.1 | Logical change encoding | M5,M6 | transaction-ordered durable records |
-| M8.2 | Pull changefeed API | M8.1 | resume from TxnID, retention errors |
-| M8.3 | In-process subscription adapter | M8.2 | bounded notification plus durable catch-up |
-| M8.4 | Versioned row decoding | M4,M6 | materialize rows under current schema |
-| M8.5 | Metadata-only add/rename/drop | M8.4 | transactional schema changes |
-| M8.6 | Online index build design/prototype | M7,M8.1 | snapshot build plus validation/catch-up |
+Status: **in progress**
+
+| ID | Status | Task | Depends on | Deliverable |
+|---|---|---|---|---|
+| M8.1 | [x] verified | Logical change encoding | M5,M6 | transaction-ordered durable records |
+| M8.2 | [ ] not started | Pull changefeed API | M8.1 | resume from TxnID, retention errors |
+| M8.3 | [ ] not started | In-process subscription adapter | M8.2 | bounded notification plus durable catch-up |
+| M8.4 | [ ] not started | Versioned row decoding | M4,M6 | materialize rows under current schema |
+| M8.5 | [ ] not started | Metadata-only add/rename/drop | M8.4 | transactional schema changes |
+| M8.6 | [ ] not started | Online index build design/prototype | M7,M8.1 | snapshot build plus validation/catch-up |
 
 Gate:
 
