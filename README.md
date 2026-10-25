@@ -9,7 +9,7 @@ authoritative source for architecture, invariants, task dependencies, and
 acceptance gates. [AGENTS.md](./AGENTS.md) contains the contribution rules that
 keep implementation work aligned with that plan.
 
-Status: **M7 optimistic concurrent writers (in progress)**. The database
+Status: **M7 optimistic concurrent writers**. The database
 persists SQL tables and indexes through immutable B+ tree roots, provides
 historical snapshot reads, and supports concurrent private write transactions
 with logical conflict validation and exact-mutation rebase.

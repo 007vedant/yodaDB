@@ -950,7 +950,7 @@ Gate:
 
 Outcome: independent write transactions overlap; genuine conflicts are explicit.
 
-Status: **in progress**
+Status: **[x] verified (2026-10-25)**
 
 | ID | Status | Task | Depends on | Deliverable |
 |---|---|---|---|---|
@@ -961,7 +961,7 @@ Status: **in progress**
 | M7.5 | [x] verified | Unique/index/catalog conflicts | M7.3,M4 | constraint-correct validation |
 | M7.6 | [x] verified | Retry API and diagnostics | M7.3 | typed conflict errors, optional bounded helper |
 | M7.7 | [x] verified | Deterministic scheduler tests | M7.2-M7.6 | enumerated interleavings |
-| M7.8 | [ ] not started | Contention benchmarks | M7.7 | disjoint/hot-key latency and abort rate |
+| M7.8 | [x] verified | Contention benchmarks | M7.7 | disjoint/hot-key latency and abort rate |
 
 Gate:
 
