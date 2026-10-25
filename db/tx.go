@@ -133,6 +133,7 @@ func (tx *Tx) Commit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	rebased := false
 	if dirty {
 		validation, err := tx.db.commitCoordinator().Validate(record.ParentTxnID, &tx.work.writeFootprint)
 		if err != nil {
@@ -146,9 +147,18 @@ func (tx *Tx) Commit(ctx context.Context) error {
 			return dberrors.New(dberrors.CodeConflict, "tx.commit", fmt.Sprintf("logical write conflict on %d resource(s) since transaction %d", len(validation.Conflicts), record.ParentTxnID))
 		}
 		if validation.LatestTxnID != record.ParentTxnID {
-			tx.work.writeTxn.CommitFailed()
-			tx.db.closeNativeWriteLocked(tx)
-			return dberrors.New(dberrors.CodeConflict, "tx.commit", fmt.Sprintf("non-conflicting transaction based on %d requires rebase onto %d", record.ParentTxnID, validation.LatestTxnID))
+			if tx.work.writeHasDDL {
+				tx.work.writeTxn.CommitFailed()
+				tx.db.closeNativeWriteLocked(tx)
+				return dberrors.New(dberrors.CodeConflict, "tx.commit", "stale catalog mutations require M7.5 validation")
+			}
+			record, err = tx.db.replayRowMutations(ctx, tx.work.writeMutations)
+			if err != nil {
+				tx.work.writeTxn.CommitFailed()
+				tx.db.closeNativeWriteLocked(tx)
+				return err
+			}
+			rebased = true
 		}
 	}
 	if dirty {
@@ -162,7 +172,7 @@ func (tx *Tx) Commit(ctx context.Context) error {
 		tx.db.closeNativeWriteLocked(tx)
 		return err
 	}
-	if dirty {
+	if dirty && !rebased {
 		tx.db.catalog = tx.work.writeCatalog
 	}
 	tx.db.closeNativeWriteLocked(tx)
@@ -239,6 +249,7 @@ func (db *DB) commitWriteLocked(ctx context.Context, owner uint64) error {
 	if err != nil {
 		return err
 	}
+	rebased := false
 	if dirty {
 		validation, err := db.commitCoordinator().Validate(record.ParentTxnID, &db.writeFootprint)
 		if err != nil {
@@ -252,9 +263,18 @@ func (db *DB) commitWriteLocked(ctx context.Context, owner uint64) error {
 			return dberrors.New(dberrors.CodeConflict, "db.commit", fmt.Sprintf("logical write conflict on %d resource(s) since transaction %d", len(validation.Conflicts), record.ParentTxnID))
 		}
 		if validation.LatestTxnID != record.ParentTxnID {
-			db.writeTxn.CommitFailed()
-			db.clearWrite()
-			return dberrors.New(dberrors.CodeConflict, "db.commit", fmt.Sprintf("non-conflicting transaction based on %d requires rebase onto %d", record.ParentTxnID, validation.LatestTxnID))
+			if db.writeHasDDL {
+				db.writeTxn.CommitFailed()
+				db.clearWrite()
+				return dberrors.New(dberrors.CodeConflict, "db.commit", "stale catalog mutations require M7.5 validation")
+			}
+			record, err = db.replayRowMutations(ctx, db.writeMutations)
+			if err != nil {
+				db.writeTxn.CommitFailed()
+				db.clearWrite()
+				return err
+			}
+			rebased = true
 		}
 	}
 	if dirty {
@@ -268,7 +288,7 @@ func (db *DB) commitWriteLocked(ctx context.Context, owner uint64) error {
 		db.clearWrite()
 		return err
 	}
-	if dirty {
+	if dirty && !rebased {
 		db.catalog = db.writeCatalog
 	}
 	db.clearWrite()
@@ -305,6 +325,8 @@ func (db *DB) clearWrite() {
 	db.writeTxn = nil
 	db.writeCatalog = nil
 	db.writeFootprint = txn.Footprint{}
+	db.writeMutations = nil
+	db.writeHasDDL = false
 	db.txOwner = 0
 }
 

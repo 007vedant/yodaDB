@@ -35,6 +35,8 @@ type DB struct {
 	writeTxn        *txn.Write
 	writeCatalog    *catalog.Catalog
 	writeFootprint  txn.Footprint
+	writeMutations  []rowMutation
+	writeHasDDL     bool
 	coordinator     *txn.Coordinator
 	writers         map[uint64]*Tx
 	readPins        map[uint64]uint64
@@ -288,9 +290,13 @@ func (db *DB) executeBound(ctx context.Context, owner uint64, statement binder.S
 
 func (db *DB) executePersistent(ctx context.Context, statement binder.Statement) (Outcome, error) {
 	before := db.writeFootprint.Clone()
+	mutationCount := len(db.writeMutations)
+	hadDDL := db.writeHasDDL
 	outcome, err := db.executePersistentStatement(ctx, statement)
 	if err != nil {
 		db.writeFootprint = before
+		db.writeMutations = db.writeMutations[:mutationCount]
+		db.writeHasDDL = hadDDL
 	}
 	return outcome, err
 }
@@ -363,6 +369,7 @@ func (db *DB) createPersistentIndex(ctx context.Context, statement *binder.Creat
 	next := db.nextManifest(txnID)
 	next.CatalogRoot = catalogRoot
 	next.IndexRoots[uint64(descriptor.ID)] = indexRoot
+	db.writeHasDDL = true
 	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
@@ -384,6 +391,7 @@ func (db *DB) createPersistentTable(ctx context.Context, statement *binder.Creat
 	next := db.nextManifest(txnID)
 	next.CatalogRoot = catalogRoot
 	next.TableRoots[uint64(created.ID)] = 0
+	db.writeHasDDL = true
 	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
@@ -435,6 +443,7 @@ func (db *DB) insertPersistent(ctx context.Context, statement *binder.Insert) (O
 	if err := db.recordRowWrite(statement.Table.ID, tableKey); err != nil {
 		return Outcome{}, err
 	}
+	db.writeMutations = append(db.writeMutations, newInsertMutation(statement.Table.ID, tableKey, row))
 	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
@@ -556,6 +565,7 @@ func (db *DB) updatePersistent(ctx context.Context, statement *binder.Update) (O
 		if err := db.recordRowWrite(statement.Table.ID, newKey); err != nil {
 			return Outcome{}, err
 		}
+		db.writeMutations = append(db.writeMutations, newUpdateMutation(statement.Table.ID, record.Key, newKey, record.Row, replacement))
 		affected++
 	}
 	if affected == 0 {
@@ -608,6 +618,7 @@ func (db *DB) deletePersistent(ctx context.Context, statement *binder.Delete) (O
 		if err := db.recordRowWrite(statement.Table.ID, record.Key); err != nil {
 			return Outcome{}, err
 		}
+		db.writeMutations = append(db.writeMutations, newDeleteMutation(statement.Table.ID, record.Key, record.Row))
 		affected++
 	}
 	if affected == 0 {
@@ -920,6 +931,8 @@ func (db *DB) publish(ctx context.Context, next manifest.Manifest) error {
 	err := db.publishWithFootprint(ctx, next, &db.writeFootprint)
 	if err == nil {
 		db.writeFootprint = txn.Footprint{}
+		db.writeMutations = nil
+		db.writeHasDDL = false
 	}
 	return err
 }

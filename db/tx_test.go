@@ -111,10 +111,10 @@ func TestConcurrentTransactionsPreparePrivateWrites(t *testing.T) {
 	if err := left.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "requires rebase") {
-		t.Fatalf("stale commit error=%v, want conflict until M7.3 validation", err)
+	if err := right.Commit(ctx); err != nil {
+		t.Fatalf("disjoint stale commit after rebase: %v", err)
 	}
-	assertStrings(t, database, "SELECT name FROM users", []string{"Ada"})
+	assertStrings(t, database, "SELECT name FROM users", []string{"Ada", "Grace"})
 }
 
 func TestCommitCoordinatorRejectsSameRowWrite(t *testing.T) {
@@ -194,10 +194,148 @@ func TestPrivateWriterDoesNotBlockCommittedAutocommit(t *testing.T) {
 	}
 	mustExec(t, database, "INSERT INTO users VALUES (2)")
 	assertOneInt64(t, database, "SELECT id FROM users WHERE id = 2", 2)
-	if err := private.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) {
-		t.Fatalf("stale private commit error=%v, want conflict", err)
+	if err := private.Commit(ctx); err != nil {
+		t.Fatalf("stale private commit after rebase: %v", err)
+	}
+	assertOneInt64(t, database, "SELECT id FROM users WHERE id = 1", 1)
+}
+
+func TestRebaseReplaysExactRowsWithoutReevaluatingPredicate(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "exact-row-replay.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, state TEXT NOT NULL, note TEXT NOT NULL)")
+	mustExec(t, database, "INSERT INTO users VALUES (1, 'ready', 'original')")
+
+	stale, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stale.Exec(ctx, "UPDATE users SET note = 'prepared' WHERE state = 'ready'"); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, database, "INSERT INTO users VALUES (2, 'ready', 'newer')")
+	if err := stale.Commit(ctx); err != nil {
+		t.Fatalf("exact-row rebase: %v", err)
+	}
+	assertStrings(t, database, "SELECT note FROM users WHERE id = 1", []string{"prepared"})
+	assertStrings(t, database, "SELECT note FROM users WHERE id = 2", []string{"newer"})
+}
+
+func TestRebaseMaintainsSecondaryIndexesForDisjointUpdates(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "rebase-indexes.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, email TEXT NOT NULL)")
+	mustExec(t, database, "CREATE UNIQUE INDEX users_email ON users (email)")
+	mustExec(t, database, "INSERT INTO users VALUES (1, 'one@example.com')")
+	mustExec(t, database, "INSERT INTO users VALUES (2, 'two@example.com')")
+
+	left, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := left.Exec(ctx, "UPDATE users SET email = 'left@example.com' WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := right.Exec(ctx, "UPDATE users SET email = 'right@example.com' WHERE id = 2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := left.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := right.Commit(ctx); err != nil {
+		t.Fatalf("indexed rebase: %v", err)
+	}
+	assertOneInt64(t, database, "SELECT id FROM users WHERE email = 'left@example.com'", 1)
+	assertOneInt64(t, database, "SELECT id FROM users WHERE email = 'right@example.com'", 2)
+}
+
+func TestRebaseReplaysDeleteBesideNewerInsert(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "rebase-delete.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY)")
+	mustExec(t, database, "INSERT INTO users VALUES (1)")
+
+	stale, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stale.Exec(ctx, "DELETE FROM users WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, database, "INSERT INTO users VALUES (2)")
+	if err := stale.Commit(ctx); err != nil {
+		t.Fatalf("delete rebase: %v", err)
 	}
 	assertNoRow(t, database, "SELECT id FROM users WHERE id = 1")
+	assertOneInt64(t, database, "SELECT id FROM users WHERE id = 2", 2)
+}
+
+func TestSQLTransactionRebasesAfterNativeCommit(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "sql-rebase.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, name TEXT NOT NULL)")
+	mustExec(t, database, "INSERT INTO users VALUES (1, 'one')")
+	mustExec(t, database, "INSERT INTO users VALUES (2, 'two')")
+
+	mustExec(t, database, "BEGIN")
+	mustExec(t, database, "UPDATE users SET name = 'sql' WHERE id = 1")
+	native, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Exec(ctx, "UPDATE users SET name = 'native' WHERE id = 2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, database, "COMMIT")
+	assertStrings(t, database, "SELECT name FROM users WHERE id = 1", []string{"sql"})
+	assertStrings(t, database, "SELECT name FROM users WHERE id = 2", []string{"native"})
+}
+
+func TestStaleCatalogMutationWaitsForCatalogValidation(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "stale-ddl.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	stale, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stale.Exec(ctx, "CREATE TABLE pending (id INT64 PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, database, "CREATE TABLE committed (id INT64 PRIMARY KEY)")
+	if err := stale.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "M7.5") {
+		t.Fatalf("stale DDL commit error=%v, want deferred catalog conflict", err)
+	}
+	if _, err := database.Query(ctx, "SELECT id FROM pending"); !errors.Is(err, dberrors.ErrBind) {
+		t.Fatalf("pending table query error=%v, want bind error", err)
+	}
 }
 
 func TestReadOnlyPrivateTransactionCanCloseAfterSnapshotBecomesStale(t *testing.T) {

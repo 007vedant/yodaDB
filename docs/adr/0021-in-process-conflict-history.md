@@ -1,6 +1,6 @@
 # ADR 0021: Validate live writers with in-process commit footprints
 
-- Status: Accepted
+- Status: Accepted; stale non-conflict policy amended by ADR 0022
 - Date: 2026-10-25
 - Owners: transactions and public API
 

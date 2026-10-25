@@ -1,6 +1,6 @@
 # ADR 0020: Prepare concurrent writers in private execution contexts
 
-- Status: Accepted
+- Status: Accepted; stale-commit policy amended by ADR 0022
 - Date: 2026-10-25
 - Owners: transactions and public API
 
