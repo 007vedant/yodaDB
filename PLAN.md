@@ -959,7 +959,7 @@ Status: **in progress**
 | M7.3 | [x] verified | Commit coordinator and validation | M7.1,M7.2 | conflict checks since base TxnID |
 | M7.4 | [x] verified | Rebase/replay on latest roots | M7.3 | publish disjoint stale-snapshot writes |
 | M7.5 | [x] verified | Unique/index/catalog conflicts | M7.3,M4 | constraint-correct validation |
-| M7.6 | [ ] not started | Retry API and diagnostics | M7.3 | typed conflict errors, optional bounded helper |
+| M7.6 | [x] verified | Retry API and diagnostics | M7.3 | typed conflict errors, optional bounded helper |
 | M7.7 | [ ] not started | Deterministic scheduler tests | M7.2-M7.6 | enumerated interleavings |
 | M7.8 | [ ] not started | Contention benchmarks | M7.7 | disjoint/hot-key latency and abort rate |
 

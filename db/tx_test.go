@@ -11,6 +11,7 @@ import (
 	"yodadb/db"
 	"yodadb/dberrors"
 	"yodadb/storage/manifest"
+	"yodadb/txn"
 )
 
 func TestTxReadOwnWritesAndOneManifestCommit(t *testing.T) {
@@ -144,8 +145,19 @@ func TestCommitCoordinatorRejectsSameRowWrite(t *testing.T) {
 	if err := left.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
+	err = right.Commit(ctx)
+	if !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
 		t.Fatalf("same-row commit error=%v, want logical write conflict", err)
+	}
+	var conflict *db.ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("same-row commit error type=%T, want *db.ConflictError", err)
+	}
+	if conflict.Kind != db.ConflictWriteWrite || conflict.BaseTxnID != 2 || conflict.LatestTxnID != 3 {
+		t.Fatalf("conflict diagnostics=%+v", conflict)
+	}
+	if len(conflict.Resources) != 1 || conflict.Resources[0].Kind() != txn.RowResource || conflict.Resources[0].ScopeID() != 1 || len(conflict.Resources[0].Key()) == 0 {
+		t.Fatalf("conflict resources=%v, want users row key", conflict.Resources)
 	}
 	assertStrings(t, database, "SELECT name FROM users WHERE id = 1", []string{"left"})
 }
@@ -370,8 +382,17 @@ func TestConcurrentSameCatalogNameConflicts(t *testing.T) {
 	if err := left.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
+	err = right.Commit(ctx)
+	if !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
 		t.Fatalf("same catalog-name commit error=%v", err)
+	}
+	var conflict *db.ConflictError
+	if !errors.As(err, &conflict) || conflict.Kind != db.ConflictWriteWrite || len(conflict.Resources) != 1 {
+		t.Fatalf("catalog conflict diagnostics=%+v", conflict)
+	}
+	resource := conflict.Resources[0]
+	if resource.Kind() != txn.CatalogResource || resource.CatalogKind() != txn.CatalogTable || resource.ScopeID() != 0 || string(resource.Key()) != "users" {
+		t.Fatalf("catalog conflict resource kind=%v catalog=%v scope=%d key=%q", resource.Kind(), resource.CatalogKind(), resource.ScopeID(), resource.Key())
 	}
 }
 
@@ -467,8 +488,16 @@ func TestConcurrentSameUniqueKeyConflicts(t *testing.T) {
 	if err := left.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
+	err = right.Commit(ctx)
+	if !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
 		t.Fatalf("same unique-key commit error=%v", err)
+	}
+	var conflict *db.ConflictError
+	if !errors.As(err, &conflict) || conflict.Kind != db.ConflictWriteWrite || len(conflict.Resources) != 1 {
+		t.Fatalf("unique conflict diagnostics=%+v", conflict)
+	}
+	if resource := conflict.Resources[0]; resource.Kind() != txn.UniqueKeyResource || resource.ScopeID() == 0 || len(resource.Key()) == 0 {
+		t.Fatalf("unique conflict resource=%v", resource)
 	}
 	assertOneInt64(t, database, "SELECT id FROM users WHERE email = 'same@example.com'", 1)
 }
@@ -505,6 +534,36 @@ func TestUniqueNullKeysRemainDisjoint(t *testing.T) {
 	}
 	assertOneInt64(t, database, "SELECT id FROM users WHERE id = 1", 1)
 	assertOneInt64(t, database, "SELECT id FROM users WHERE id = 2", 2)
+}
+
+func TestNewUniqueIndexProducesTypedRebaseConflict(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "unique-index-rebase-conflict.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, email TEXT)")
+	mustExec(t, database, "INSERT INTO users VALUES (1, 'same@example.com')")
+
+	stale, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stale.Exec(ctx, "INSERT INTO users VALUES (2, 'same@example.com')"); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, database, "CREATE UNIQUE INDEX users_email ON users (email)")
+
+	err = stale.Commit(ctx)
+	var conflict *db.ConflictError
+	if !errors.As(err, &conflict) || !errors.Is(err, dberrors.ErrConflict) {
+		t.Fatalf("stale commit error=%v, want typed rebase conflict", err)
+	}
+	if conflict.Kind != db.ConflictRebase || conflict.BaseTxnID != 2 || conflict.LatestTxnID != 3 || len(conflict.Resources) != 0 {
+		t.Fatalf("rebase conflict diagnostics=%+v", conflict)
+	}
+	assertNoRow(t, database, "SELECT id FROM users WHERE id = 2")
 }
 
 func TestReadOnlyPrivateTransactionCanCloseAfterSnapshotBecomesStale(t *testing.T) {

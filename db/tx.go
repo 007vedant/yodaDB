@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"yodadb/dberrors"
@@ -136,23 +135,24 @@ func (tx *Tx) Commit(ctx context.Context) error {
 	rebased := false
 	rebasedCatalog := tx.db.catalog
 	if dirty {
-		validation, err := tx.db.commitCoordinator().Validate(record.ParentTxnID, &tx.work.writeFootprint)
+		baseTxnID := record.ParentTxnID
+		validation, err := tx.db.commitCoordinator().Validate(baseTxnID, &tx.work.writeFootprint)
 		if err != nil {
 			tx.work.writeTxn.CommitFailed()
 			tx.db.closeNativeWriteLocked(tx)
-			return err
+			return commitConflict(ConflictValidation, "tx.commit", baseTxnID, tx.db.manifest.TxnID, nil, err)
 		}
 		if len(validation.Conflicts) != 0 {
 			tx.work.writeTxn.CommitFailed()
 			tx.db.closeNativeWriteLocked(tx)
-			return dberrors.New(dberrors.CodeConflict, "tx.commit", fmt.Sprintf("logical write conflict on %d resource(s) since transaction %d", len(validation.Conflicts), record.ParentTxnID))
+			return newConflictError(ConflictWriteWrite, "tx.commit", baseTxnID, validation.LatestTxnID, validation.Conflicts, nil)
 		}
-		if validation.LatestTxnID != record.ParentTxnID {
+		if validation.LatestTxnID != baseTxnID {
 			record, rebasedCatalog, err = tx.db.replayTransaction(ctx, tx.work.catalogMutations, tx.work.writeMutations)
 			if err != nil {
 				tx.work.writeTxn.CommitFailed()
 				tx.db.closeNativeWriteLocked(tx)
-				return err
+				return commitConflict(ConflictRebase, "tx.commit", baseTxnID, validation.LatestTxnID, nil, err)
 			}
 			rebased = true
 		}
@@ -252,23 +252,24 @@ func (db *DB) commitWriteLocked(ctx context.Context, owner uint64) error {
 	rebased := false
 	rebasedCatalog := db.catalog
 	if dirty {
-		validation, err := db.commitCoordinator().Validate(record.ParentTxnID, &db.writeFootprint)
+		baseTxnID := record.ParentTxnID
+		validation, err := db.commitCoordinator().Validate(baseTxnID, &db.writeFootprint)
 		if err != nil {
 			db.writeTxn.CommitFailed()
 			db.clearWrite()
-			return err
+			return commitConflict(ConflictValidation, "db.commit", baseTxnID, db.manifest.TxnID, nil, err)
 		}
 		if len(validation.Conflicts) != 0 {
 			db.writeTxn.CommitFailed()
 			db.clearWrite()
-			return dberrors.New(dberrors.CodeConflict, "db.commit", fmt.Sprintf("logical write conflict on %d resource(s) since transaction %d", len(validation.Conflicts), record.ParentTxnID))
+			return newConflictError(ConflictWriteWrite, "db.commit", baseTxnID, validation.LatestTxnID, validation.Conflicts, nil)
 		}
-		if validation.LatestTxnID != record.ParentTxnID {
+		if validation.LatestTxnID != baseTxnID {
 			record, rebasedCatalog, err = db.replayTransaction(ctx, db.catalogMutations, db.writeMutations)
 			if err != nil {
 				db.writeTxn.CommitFailed()
 				db.clearWrite()
-				return err
+				return commitConflict(ConflictRebase, "db.commit", baseTxnID, validation.LatestTxnID, nil, err)
 			}
 			rebased = true
 		}
