@@ -9,10 +9,10 @@ authoritative source for architecture, invariants, task dependencies, and
 acceptance gates. [AGENTS.md](./AGENTS.md) contains the contribution rules that
 keep implementation work aligned with that plan.
 
-Status: **M4 persistent SQL tables and indexes**. The database now persists its
-catalog, tables, primary keys, and secondary indexes through immutable B+ tree
-roots. `INSERT`, `SELECT`, `UPDATE`, `DELETE`, unique indexes, range/index
-planning, and deterministic `EXPLAIN` survive close and reopen.
+Status: **M7 optimistic concurrent writers (in progress)**. The database
+persists SQL tables and indexes through immutable B+ tree roots, provides
+historical snapshot reads, and supports concurrent private write transactions
+with logical conflict validation and exact-mutation rebase.
 
 ## Requirements
 
@@ -74,8 +74,11 @@ if err != nil {
 }
 ```
 
-M5.1 permits one active writer per database handle. Its queries read its own
-writes, and rollback publishes no roots. Transactional DDL is deferred to M5.7.
+Separate native transaction handles can prepare writes concurrently. Their
+queries read their own writes, rollback publishes no roots, and conflicting
+commits return typed diagnostics. See
+[docs/transactions.md](./docs/transactions.md) for retry behavior, conflict
+identities, and the snapshot-isolation/write-skew boundary.
 
 ## Inspecting a page file
 
