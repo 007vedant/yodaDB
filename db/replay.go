@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"time"
 
 	"yodadb/catalog"
 	"yodadb/dberrors"
@@ -51,17 +50,12 @@ func newDeleteMutation(tableID catalog.TableID, key []byte, row types.Row) rowMu
 	return rowMutation{kind: rowDelete, tableID: tableID, beforeKey: bytes.Clone(key), before: cloneRow(row)}
 }
 
-func (db *DB) replayRowMutations(ctx context.Context, mutations []rowMutation) (manifest.Manifest, error) {
-	if db.manifest.TxnID == ^uint64(0) {
-		return manifest.Manifest{}, dberrors.New(dberrors.CodeResourceLimit, "db.replay", "transaction ID space is exhausted")
-	}
-	next := cloneManifest(db.manifest)
-	next.TxnID = db.manifest.TxnID + 1
-	next.ParentTxnID = db.manifest.TxnID
-	next.CommitUnixNano = time.Now().UnixNano()
-
+func (db *DB) replayRowMutationsOnto(ctx context.Context, next manifest.Manifest, schema *catalog.Catalog, tableIDs map[catalog.TableID]catalog.TableID, mutations []rowMutation) (manifest.Manifest, error) {
 	for _, mutation := range mutations {
-		descriptor, found := db.catalog.TableByID(mutation.tableID)
+		if mapped, exists := tableIDs[mutation.tableID]; exists {
+			mutation.tableID = mapped
+		}
+		descriptor, found := schema.TableByID(mutation.tableID)
 		if !found {
 			return manifest.Manifest{}, replayConflict(mutation, "table no longer exists")
 		}
@@ -85,7 +79,7 @@ func (db *DB) replayRowMutations(ctx context.Context, mutations []rowMutation) (
 				return manifest.Manifest{}, replayConflict(mutation, "insert key changed")
 			}
 			next.TableRoots[uint64(mutation.tableID)] = newRoot
-			if err := db.replayInsertIndexes(ctx, next.TxnID, descriptor, mutation.after, key, &next); err != nil {
+			if err := db.replayInsertIndexes(ctx, next.TxnID, schema, descriptor, mutation.after, key, &next); err != nil {
 				return manifest.Manifest{}, err
 			}
 
@@ -97,7 +91,7 @@ func (db *DB) replayRowMutations(ctx context.Context, mutations []rowMutation) (
 			if !found || !rowsEqual(current, mutation.before) {
 				return manifest.Manifest{}, replayConflict(mutation, "updated row changed after validation")
 			}
-			if err := db.replayDeleteIndexes(ctx, next.TxnID, descriptor, current, mutation.beforeKey, &next); err != nil {
+			if err := db.replayDeleteIndexes(ctx, next.TxnID, schema, descriptor, current, mutation.beforeKey, &next); err != nil {
 				return manifest.Manifest{}, err
 			}
 			hiddenID, err := hiddenRowID(descriptor, mutation.beforeKey)
@@ -112,7 +106,7 @@ func (db *DB) replayRowMutations(ctx context.Context, mutations []rowMutation) (
 				return manifest.Manifest{}, replayConflict(mutation, "updated key changed")
 			}
 			next.TableRoots[uint64(mutation.tableID)] = newRoot
-			if err := db.replayInsertIndexes(ctx, next.TxnID, descriptor, mutation.after, key, &next); err != nil {
+			if err := db.replayInsertIndexes(ctx, next.TxnID, schema, descriptor, mutation.after, key, &next); err != nil {
 				return manifest.Manifest{}, err
 			}
 
@@ -124,7 +118,7 @@ func (db *DB) replayRowMutations(ctx context.Context, mutations []rowMutation) (
 			if !found || !rowsEqual(current, mutation.before) {
 				return manifest.Manifest{}, replayConflict(mutation, "deleted row changed after validation")
 			}
-			if err := db.replayDeleteIndexes(ctx, next.TxnID, descriptor, current, mutation.beforeKey, &next); err != nil {
+			if err := db.replayDeleteIndexes(ctx, next.TxnID, schema, descriptor, current, mutation.beforeKey, &next); err != nil {
 				return manifest.Manifest{}, err
 			}
 			newRoot, deleted, err := tableTree.Delete(ctx, db.storage, next.TxnID, mutation.beforeKey)
@@ -143,8 +137,8 @@ func (db *DB) replayRowMutations(ctx context.Context, mutations []rowMutation) (
 	return next, nil
 }
 
-func (db *DB) replayInsertIndexes(ctx context.Context, txnID uint64, descriptor catalog.Table, row types.Row, key []byte, next *manifest.Manifest) error {
-	for _, index := range db.catalog.IndexesForTable(descriptor.ID) {
+func (db *DB) replayInsertIndexes(ctx context.Context, txnID uint64, schema *catalog.Catalog, descriptor catalog.Table, row types.Row, key []byte, next *manifest.Manifest) error {
+	for _, index := range schema.IndexesForTable(descriptor.ID) {
 		definition, err := indexDefinition(descriptor, index)
 		if err != nil {
 			return err
@@ -162,8 +156,8 @@ func (db *DB) replayInsertIndexes(ctx context.Context, txnID uint64, descriptor 
 	return nil
 }
 
-func (db *DB) replayDeleteIndexes(ctx context.Context, txnID uint64, descriptor catalog.Table, row types.Row, key []byte, next *manifest.Manifest) error {
-	for _, index := range db.catalog.IndexesForTable(descriptor.ID) {
+func (db *DB) replayDeleteIndexes(ctx context.Context, txnID uint64, schema *catalog.Catalog, descriptor catalog.Table, row types.Row, key []byte, next *manifest.Manifest) error {
+	for _, index := range schema.IndexesForTable(descriptor.ID) {
 		root, err := db.deleteIndexEntry(ctx, txnID, descriptor, index, next.IndexRoots[uint64(index.ID)], row, key)
 		if err != nil {
 			return dberrors.Wrap(err, dberrors.CodeConflict, "db.replay", fmt.Sprintf("index %q delete conflicts with latest roots", index.Name))

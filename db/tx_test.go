@@ -314,7 +314,7 @@ func TestSQLTransactionRebasesAfterNativeCommit(t *testing.T) {
 	assertStrings(t, database, "SELECT name FROM users WHERE id = 2", []string{"native"})
 }
 
-func TestStaleCatalogMutationWaitsForCatalogValidation(t *testing.T) {
+func TestStaleDisjointTableCreationRebasesTentativeIDs(t *testing.T) {
 	ctx := context.Background()
 	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "stale-ddl.yoda"))
 	if err != nil {
@@ -326,16 +326,185 @@ func TestStaleCatalogMutationWaitsForCatalogValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stale.Exec(ctx, "CREATE TABLE pending (id INT64 PRIMARY KEY)"); err != nil {
+	if _, err := stale.Exec(ctx, "CREATE TABLE pending (id INT64 PRIMARY KEY, email TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stale.Exec(ctx, "CREATE UNIQUE INDEX pending_email ON pending (email)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stale.Exec(ctx, "INSERT INTO pending VALUES (7, 'pending@example.com')"); err != nil {
 		t.Fatal(err)
 	}
 	mustExec(t, database, "CREATE TABLE committed (id INT64 PRIMARY KEY)")
-	if err := stale.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "M7.5") {
-		t.Fatalf("stale DDL commit error=%v, want deferred catalog conflict", err)
+	mustExec(t, database, "INSERT INTO committed VALUES (9)")
+	if err := stale.Commit(ctx); err != nil {
+		t.Fatalf("stale disjoint DDL commit: %v", err)
 	}
-	if _, err := database.Query(ctx, "SELECT id FROM pending"); !errors.Is(err, dberrors.ErrBind) {
-		t.Fatalf("pending table query error=%v, want bind error", err)
+	assertOneInt64(t, database, "SELECT id FROM pending", 7)
+	assertOneInt64(t, database, "SELECT id FROM committed", 9)
+	assertPlan(t, database, "EXPLAIN SELECT id FROM pending WHERE email = 'pending@example.com'", "INDEX LOOKUP pending_email ON pending(email)")
+}
+
+func TestConcurrentSameCatalogNameConflicts(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "catalog-name-conflict.yoda"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer database.Close()
+
+	left, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := left.Exec(ctx, "CREATE TABLE users (id INT64 PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := right.Exec(ctx, "CREATE TABLE users (id INT64 PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := left.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
+		t.Fatalf("same catalog-name commit error=%v", err)
+	}
+}
+
+func TestStaleDisjointIndexCreationRebasesTentativeIDs(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "stale-index-ddl.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, email TEXT, score INT64)")
+	mustExec(t, database, "INSERT INTO users VALUES (1, 'ada@example.com', 10)")
+
+	left, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := left.Exec(ctx, "CREATE INDEX users_email ON users (email)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := right.Exec(ctx, "CREATE INDEX users_score ON users (score)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := left.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := right.Commit(ctx); err != nil {
+		t.Fatalf("stale disjoint index commit: %v", err)
+	}
+	assertPlan(t, database, "EXPLAIN SELECT id FROM users WHERE email = 'ada@example.com'", "INDEX LOOKUP users_email ON users(email)")
+	assertPlan(t, database, "EXPLAIN SELECT id FROM users WHERE score = 10", "INDEX LOOKUP users_score ON users(score)")
+}
+
+func TestConcurrentSameIndexNameConflicts(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "index-name-conflict.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, email TEXT, score INT64)")
+
+	left, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := left.Exec(ctx, "CREATE INDEX lookup ON users (email)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := right.Exec(ctx, "CREATE INDEX lookup ON users (score)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := left.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
+		t.Fatalf("same index-name commit error=%v", err)
+	}
+}
+
+func TestConcurrentSameUniqueKeyConflicts(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "unique-key-conflict.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, email TEXT)")
+	mustExec(t, database, "CREATE UNIQUE INDEX users_email ON users (email)")
+
+	left, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := left.Exec(ctx, "INSERT INTO users VALUES (1, 'same@example.com')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := right.Exec(ctx, "INSERT INTO users VALUES (2, 'same@example.com')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := left.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
+		t.Fatalf("same unique-key commit error=%v", err)
+	}
+	assertOneInt64(t, database, "SELECT id FROM users WHERE email = 'same@example.com'", 1)
+}
+
+func TestUniqueNullKeysRemainDisjoint(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "unique-null-rebase.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, email TEXT)")
+	mustExec(t, database, "CREATE UNIQUE INDEX users_email ON users (email)")
+
+	left, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := left.Exec(ctx, "INSERT INTO users VALUES (1, NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := right.Exec(ctx, "INSERT INTO users VALUES (2, NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := left.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := right.Commit(ctx); err != nil {
+		t.Fatalf("NULL unique-key rebase: %v", err)
+	}
+	assertOneInt64(t, database, "SELECT id FROM users WHERE id = 1", 1)
+	assertOneInt64(t, database, "SELECT id FROM users WHERE id = 2", 2)
 }
 
 func TestReadOnlyPrivateTransactionCanCloseAfterSnapshotBecomesStale(t *testing.T) {

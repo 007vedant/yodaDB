@@ -25,23 +25,23 @@ import (
 // DB is a yodaDB handle backed either by in-memory execution or a persistent
 // page file opened through Create or Open.
 type DB struct {
-	mu              sync.RWMutex
-	writerLifecycle sync.RWMutex
-	closed          bool
-	catalog         *catalog.Catalog
-	engine          *sqlexec.Engine
-	storage         *manifest.Database
-	manifest        manifest.Manifest
-	writeTxn        *txn.Write
-	writeCatalog    *catalog.Catalog
-	writeFootprint  txn.Footprint
-	writeMutations  []rowMutation
-	writeHasDDL     bool
-	coordinator     *txn.Coordinator
-	writers         map[uint64]*Tx
-	readPins        map[uint64]uint64
-	txOwner         uint64
-	nextTxID        uint64
+	mu               sync.RWMutex
+	writerLifecycle  sync.RWMutex
+	closed           bool
+	catalog          *catalog.Catalog
+	engine           *sqlexec.Engine
+	storage          *manifest.Database
+	manifest         manifest.Manifest
+	writeTxn         *txn.Write
+	writeCatalog     *catalog.Catalog
+	writeFootprint   txn.Footprint
+	writeMutations   []rowMutation
+	catalogMutations []catalogMutation
+	coordinator      *txn.Coordinator
+	writers          map[uint64]*Tx
+	readPins         map[uint64]uint64
+	txOwner          uint64
+	nextTxID         uint64
 }
 
 // Durability is the persistence contract for successful commits.
@@ -291,12 +291,12 @@ func (db *DB) executeBound(ctx context.Context, owner uint64, statement binder.S
 func (db *DB) executePersistent(ctx context.Context, statement binder.Statement) (Outcome, error) {
 	before := db.writeFootprint.Clone()
 	mutationCount := len(db.writeMutations)
-	hadDDL := db.writeHasDDL
+	catalogMutationCount := len(db.catalogMutations)
 	outcome, err := db.executePersistentStatement(ctx, statement)
 	if err != nil {
 		db.writeFootprint = before
 		db.writeMutations = db.writeMutations[:mutationCount]
-		db.writeHasDDL = hadDDL
+		db.catalogMutations = db.catalogMutations[:catalogMutationCount]
 	}
 	return outcome, err
 }
@@ -369,7 +369,9 @@ func (db *DB) createPersistentIndex(ctx context.Context, statement *binder.Creat
 	next := db.nextManifest(txnID)
 	next.CatalogRoot = catalogRoot
 	next.IndexRoots[uint64(descriptor.ID)] = indexRoot
-	db.writeHasDDL = true
+	if err := db.recordCreateIndex(statement, descriptor); err != nil {
+		return Outcome{}, err
+	}
 	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
@@ -391,7 +393,9 @@ func (db *DB) createPersistentTable(ctx context.Context, statement *binder.Creat
 	next := db.nextManifest(txnID)
 	next.CatalogRoot = catalogRoot
 	next.TableRoots[uint64(created.ID)] = 0
-	db.writeHasDDL = true
+	if err := db.recordCreateTable(statement, created); err != nil {
+		return Outcome{}, err
+	}
 	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
@@ -441,6 +445,9 @@ func (db *DB) insertPersistent(ctx context.Context, statement *binder.Insert) (O
 		next.IndexRoots[uint64(descriptor.ID)] = root
 	}
 	if err := db.recordRowWrite(statement.Table.ID, tableKey); err != nil {
+		return Outcome{}, err
+	}
+	if err := db.recordUniqueWrites(statement.Table, row); err != nil {
 		return Outcome{}, err
 	}
 	db.writeMutations = append(db.writeMutations, newInsertMutation(statement.Table.ID, tableKey, row))
@@ -565,6 +572,12 @@ func (db *DB) updatePersistent(ctx context.Context, statement *binder.Update) (O
 		if err := db.recordRowWrite(statement.Table.ID, newKey); err != nil {
 			return Outcome{}, err
 		}
+		if err := db.recordUniqueWrites(statement.Table, record.Row); err != nil {
+			return Outcome{}, err
+		}
+		if err := db.recordUniqueWrites(statement.Table, replacement); err != nil {
+			return Outcome{}, err
+		}
 		db.writeMutations = append(db.writeMutations, newUpdateMutation(statement.Table.ID, record.Key, newKey, record.Row, replacement))
 		affected++
 	}
@@ -616,6 +629,9 @@ func (db *DB) deletePersistent(ctx context.Context, statement *binder.Delete) (O
 			return Outcome{}, err
 		}
 		if err := db.recordRowWrite(statement.Table.ID, record.Key); err != nil {
+			return Outcome{}, err
+		}
+		if err := db.recordUniqueWrites(statement.Table, record.Row); err != nil {
 			return Outcome{}, err
 		}
 		db.writeMutations = append(db.writeMutations, newDeleteMutation(statement.Table.ID, record.Key, record.Row))
@@ -773,11 +789,44 @@ func (db *DB) finishMutation(ctx context.Context, next manifest.Manifest) error 
 }
 
 func (db *DB) recordRowWrite(tableID catalog.TableID, key []byte) error {
+	if db.isLocallyCreatedTable(tableID) {
+		return nil
+	}
 	resource, err := txn.NewRowResource(uint64(tableID), key)
 	if err != nil {
 		return err
 	}
 	return db.writeFootprint.RecordWrite(resource)
+}
+
+func (db *DB) recordUniqueWrites(tableDescriptor catalog.Table, row types.Row) error {
+	if db.isLocallyCreatedTable(tableDescriptor.ID) {
+		return nil
+	}
+	for _, descriptor := range db.currentCatalog().IndexesForTable(tableDescriptor.ID) {
+		if db.isLocallyCreatedIndex(descriptor.ID) {
+			continue
+		}
+		definition, err := indexDefinition(tableDescriptor, descriptor)
+		if err != nil {
+			return err
+		}
+		key, applicable, err := storageindex.EncodeUniqueKey(definition, row)
+		if err != nil {
+			return err
+		}
+		if !applicable {
+			continue
+		}
+		resource, err := txn.NewUniqueKeyResource(uint64(descriptor.ID), key)
+		if err != nil {
+			return err
+		}
+		if err := db.writeFootprint.RecordWrite(resource); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (db *DB) nextHiddenRowID(ctx context.Context, descriptor catalog.Table, tree *table.Tree) (uint64, error) {
@@ -932,7 +981,7 @@ func (db *DB) publish(ctx context.Context, next manifest.Manifest) error {
 	if err == nil {
 		db.writeFootprint = txn.Footprint{}
 		db.writeMutations = nil
-		db.writeHasDDL = false
+		db.catalogMutations = nil
 	}
 	return err
 }

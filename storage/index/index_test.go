@@ -86,3 +86,24 @@ func TestUniqueIndexAllowsMultipleNulls(t *testing.T) {
 		t.Fatalf("NULL Lookup = %q, %v", keys, err)
 	}
 }
+
+func TestEncodeUniqueKeyTracksOnlyEnforcedKeys(t *testing.T) {
+	row := types.Row{types.Int64(7), types.Text("ada@example.test")}
+	key, applicable, err := index.EncodeUniqueKey(index.Definition{Columns: []int{1}, Unique: true}, row)
+	if err != nil || !applicable {
+		t.Fatalf("EncodeUniqueKey applicable=%t error=%v", applicable, err)
+	}
+	want, err := types.EncodeKey(types.Row{types.Text("ada@example.test")}, types.KeyLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(key) != string(want) {
+		t.Fatalf("unique key=%x, want %x", key, want)
+	}
+	if _, applicable, err := index.EncodeUniqueKey(index.Definition{Columns: []int{1}}, row); err != nil || applicable {
+		t.Fatalf("non-unique applicable=%t error=%v", applicable, err)
+	}
+	if _, applicable, err := index.EncodeUniqueKey(index.Definition{Columns: []int{1}, Unique: true}, types.Row{types.Int64(7), types.Null()}); err != nil || applicable {
+		t.Fatalf("NULL unique applicable=%t error=%v", applicable, err)
+	}
+}

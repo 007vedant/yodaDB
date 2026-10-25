@@ -155,6 +155,35 @@ func (t *Tree) ScanRange(ctx context.Context, start, end []byte) ([][]byte, erro
 	}
 }
 
+// EncodeUniqueKey returns the canonical logical key protected by a unique
+// index. applicable is false for non-unique indexes and for rows containing a
+// NULL indexed value, because SQL permits multiple such entries.
+func EncodeUniqueKey(definition Definition, row types.Row) (key []byte, applicable bool, err error) {
+	if !definition.Unique {
+		return nil, false, nil
+	}
+	values := make(types.Row, len(definition.Columns))
+	seen := make(map[int]struct{}, len(definition.Columns))
+	for index, ordinal := range definition.Columns {
+		if ordinal < 0 || ordinal >= len(row) {
+			return nil, false, dberrors.New(dberrors.CodeConstraint, "index.unique_key", fmt.Sprintf("column ordinal %d outside row width %d", ordinal, len(row)))
+		}
+		if _, duplicate := seen[ordinal]; duplicate {
+			return nil, false, dberrors.New(dberrors.CodeConstraint, "index.unique_key", "index repeats a column ordinal")
+		}
+		seen[ordinal] = struct{}{}
+		values[index] = row[ordinal]
+	}
+	if len(values) == 0 {
+		return nil, false, dberrors.New(dberrors.CodeConstraint, "index.unique_key", "index requires at least one column")
+	}
+	if containsNull(values) {
+		return nil, false, nil
+	}
+	key, err = types.EncodeKey(values, types.KeyLimits{})
+	return key, err == nil, err
+}
+
 func (t *Tree) entryKey(row types.Row, tableKey []byte) ([]byte, bool, error) {
 	values := make(types.Row, len(t.def.Columns), len(t.def.Columns)+1)
 	for index, ordinal := range t.def.Columns {
