@@ -34,6 +34,8 @@ type DB struct {
 	manifest        manifest.Manifest
 	writeTxn        *txn.Write
 	writeCatalog    *catalog.Catalog
+	writeFootprint  txn.Footprint
+	coordinator     *txn.Coordinator
 	writers         map[uint64]*Tx
 	readPins        map[uint64]uint64
 	txOwner         uint64
@@ -58,7 +60,7 @@ type Options struct {
 // New creates an empty in-memory database.
 func New() *DB {
 	schema := catalog.New()
-	return &DB{catalog: schema, engine: sqlexec.NewEngine(schema)}
+	return &DB{catalog: schema, engine: sqlexec.NewEngine(schema), coordinator: txn.NewCoordinator(0)}
 }
 
 // Create creates an empty persistent database file.
@@ -73,8 +75,9 @@ func CreateWithOptions(ctx context.Context, path string, options Options) (*DB, 
 		return nil, err
 	}
 	return &DB{
-		catalog: catalog.New(),
-		storage: storage,
+		catalog:     catalog.New(),
+		storage:     storage,
+		coordinator: txn.NewCoordinator(0),
 		manifest: manifest.Manifest{
 			TableRoots: make(map[uint64]page.ID),
 			IndexRoots: make(map[uint64]page.ID),
@@ -115,7 +118,7 @@ func OpenWithOptions(ctx context.Context, path string, options Options) (*DB, er
 		return nil, err
 	}
 	keep = true
-	return &DB{catalog: schema, storage: storage, manifest: cloneManifest(record)}, nil
+	return &DB{catalog: schema, storage: storage, manifest: cloneManifest(record), coordinator: txn.NewCoordinator(record.TxnID)}, nil
 }
 
 // Result describes a successfully executed non-query statement.
@@ -284,6 +287,15 @@ func (db *DB) executeBound(ctx context.Context, owner uint64, statement binder.S
 }
 
 func (db *DB) executePersistent(ctx context.Context, statement binder.Statement) (Outcome, error) {
+	before := db.writeFootprint.Clone()
+	outcome, err := db.executePersistentStatement(ctx, statement)
+	if err != nil {
+		db.writeFootprint = before
+	}
+	return outcome, err
+}
+
+func (db *DB) executePersistentStatement(ctx context.Context, statement binder.Statement) (Outcome, error) {
 	switch statement := statement.(type) {
 	case *binder.CreateTable:
 		return db.createPersistentTable(ctx, statement)
@@ -420,6 +432,9 @@ func (db *DB) insertPersistent(ctx context.Context, statement *binder.Insert) (O
 		}
 		next.IndexRoots[uint64(descriptor.ID)] = root
 	}
+	if err := db.recordRowWrite(statement.Table.ID, tableKey); err != nil {
+		return Outcome{}, err
+	}
 	if err := db.finishMutation(ctx, next); err != nil {
 		return Outcome{}, err
 	}
@@ -535,6 +550,12 @@ func (db *DB) updatePersistent(ctx context.Context, statement *binder.Update) (O
 			}
 			next.IndexRoots[uint64(descriptor.ID)] = root
 		}
+		if err := db.recordRowWrite(statement.Table.ID, record.Key); err != nil {
+			return Outcome{}, err
+		}
+		if err := db.recordRowWrite(statement.Table.ID, newKey); err != nil {
+			return Outcome{}, err
+		}
 		affected++
 	}
 	if affected == 0 {
@@ -582,6 +603,9 @@ func (db *DB) deletePersistent(ctx context.Context, statement *binder.Delete) (O
 		}
 		tableRoot, _, err = currentTable.Delete(ctx, db.storage, txnID, record.Key)
 		if err != nil {
+			return Outcome{}, err
+		}
+		if err := db.recordRowWrite(statement.Table.ID, record.Key); err != nil {
 			return Outcome{}, err
 		}
 		affected++
@@ -737,6 +761,14 @@ func (db *DB) finishMutation(ctx context.Context, next manifest.Manifest) error 
 	return db.publish(ctx, next)
 }
 
+func (db *DB) recordRowWrite(tableID catalog.TableID, key []byte) error {
+	resource, err := txn.NewRowResource(uint64(tableID), key)
+	if err != nil {
+		return err
+	}
+	return db.writeFootprint.RecordWrite(resource)
+}
+
 func (db *DB) nextHiddenRowID(ctx context.Context, descriptor catalog.Table, tree *table.Tree) (uint64, error) {
 	if descriptor.PrimaryKeyIndex >= 0 {
 		return db.currentTxnID(), nil
@@ -885,6 +917,14 @@ func isQuery(statement binder.Statement) bool {
 }
 
 func (db *DB) publish(ctx context.Context, next manifest.Manifest) error {
+	err := db.publishWithFootprint(ctx, next, &db.writeFootprint)
+	if err == nil {
+		db.writeFootprint = txn.Footprint{}
+	}
+	return err
+}
+
+func (db *DB) publishWithFootprint(ctx context.Context, next manifest.Manifest, footprint *txn.Footprint) error {
 	if next.TableRoots == nil {
 		next.TableRoots = make(map[uint64]page.ID)
 	}
@@ -895,7 +935,20 @@ func (db *DB) publish(ctx context.Context, next manifest.Manifest) error {
 		return err
 	}
 	db.manifest = cloneManifest(next)
+	if err := db.commitCoordinator().RecordCommitted(next.TxnID, footprint); err != nil {
+		// Publication is already durable. Resetting the in-memory baseline makes
+		// older live writers fail conservatively without reporting this commit as
+		// failed or risking a missed conflict.
+		db.coordinator = txn.NewCoordinator(next.TxnID)
+	}
 	return nil
+}
+
+func (db *DB) commitCoordinator() *txn.Coordinator {
+	if db.coordinator == nil {
+		db.coordinator = txn.NewCoordinator(db.manifest.TxnID)
+	}
+	return db.coordinator
 }
 
 func cloneManifest(record manifest.Manifest) manifest.Manifest {

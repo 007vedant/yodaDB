@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -110,10 +111,69 @@ func TestConcurrentTransactionsPreparePrivateWrites(t *testing.T) {
 	if err := left.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) {
+	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "requires rebase") {
 		t.Fatalf("stale commit error=%v, want conflict until M7.3 validation", err)
 	}
 	assertStrings(t, database, "SELECT name FROM users", []string{"Ada"})
+}
+
+func TestCommitCoordinatorRejectsSameRowWrite(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "same-row-conflict.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, name TEXT NOT NULL)")
+	mustExec(t, database, "INSERT INTO users VALUES (1, 'original')")
+
+	left, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := left.Exec(ctx, "UPDATE users SET name = 'left' WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := right.Exec(ctx, "UPDATE users SET name = 'right' WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := left.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
+		t.Fatalf("same-row commit error=%v, want logical write conflict", err)
+	}
+	assertStrings(t, database, "SELECT name FROM users WHERE id = 1", []string{"left"})
+}
+
+func TestCommitCoordinatorChecksAllTransactionsSinceBase(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "conflict-history.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, name TEXT NOT NULL)")
+	mustExec(t, database, "INSERT INTO users VALUES (1, 'one')")
+	mustExec(t, database, "INSERT INTO users VALUES (2, 'two')")
+
+	stale, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stale.Exec(ctx, "UPDATE users SET name = 'stale' WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, database, "UPDATE users SET name = 'committed' WHERE id = 1")
+	mustExec(t, database, "UPDATE users SET name = 'newer' WHERE id = 2")
+	if err := stale.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) || !strings.Contains(err.Error(), "logical write conflict") {
+		t.Fatalf("historical conflict error=%v", err)
+	}
+	assertStrings(t, database, "SELECT name FROM users WHERE id = 1", []string{"committed"})
 }
 
 func TestPrivateWriterDoesNotBlockCommittedAutocommit(t *testing.T) {

@@ -101,6 +101,36 @@ type Footprint struct {
 	writes map[Resource]struct{}
 }
 
+// Clone returns an independent copy of the footprint.
+func (f *Footprint) Clone() Footprint {
+	var cloned Footprint
+	if f == nil {
+		return cloned
+	}
+	cloned.reads = cloneResourceSet(f.reads)
+	cloned.writes = cloneResourceSet(f.writes)
+	return cloned
+}
+
+// Merge adds every read and write from other to f.
+func (f *Footprint) Merge(other *Footprint) {
+	if f == nil || other == nil {
+		return
+	}
+	if len(other.reads) != 0 && f.reads == nil {
+		f.reads = make(map[Resource]struct{}, len(other.reads))
+	}
+	for resource := range other.reads {
+		f.reads[resource] = struct{}{}
+	}
+	if len(other.writes) != 0 && f.writes == nil {
+		f.writes = make(map[Resource]struct{}, len(other.writes))
+	}
+	for resource := range other.writes {
+		f.writes[resource] = struct{}{}
+	}
+}
+
 // RecordRead adds a logical resource to the read set.
 func (f *Footprint) RecordRead(resource Resource) error {
 	if err := validateResource(resource); err != nil {
@@ -221,4 +251,15 @@ func sortedResources(set map[Resource]struct{}) []Resource {
 		return a.key < b.key
 	})
 	return resources
+}
+
+func cloneResourceSet(set map[Resource]struct{}) map[Resource]struct{} {
+	if len(set) == 0 {
+		return nil
+	}
+	cloned := make(map[Resource]struct{}, len(set))
+	for resource := range set {
+		cloned[resource] = struct{}{}
+	}
+	return cloned
 }

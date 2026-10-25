@@ -133,13 +133,26 @@ func (tx *Tx) Commit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if dirty && record.ParentTxnID != tx.db.manifest.TxnID {
-		tx.work.writeTxn.CommitFailed()
-		tx.db.closeNativeWriteLocked(tx)
-		return dberrors.New(dberrors.CodeConflict, "tx.commit", fmt.Sprintf("transaction snapshot %d is stale; latest transaction is %d", record.ParentTxnID, tx.db.manifest.TxnID))
+	if dirty {
+		validation, err := tx.db.commitCoordinator().Validate(record.ParentTxnID, &tx.work.writeFootprint)
+		if err != nil {
+			tx.work.writeTxn.CommitFailed()
+			tx.db.closeNativeWriteLocked(tx)
+			return err
+		}
+		if len(validation.Conflicts) != 0 {
+			tx.work.writeTxn.CommitFailed()
+			tx.db.closeNativeWriteLocked(tx)
+			return dberrors.New(dberrors.CodeConflict, "tx.commit", fmt.Sprintf("logical write conflict on %d resource(s) since transaction %d", len(validation.Conflicts), record.ParentTxnID))
+		}
+		if validation.LatestTxnID != record.ParentTxnID {
+			tx.work.writeTxn.CommitFailed()
+			tx.db.closeNativeWriteLocked(tx)
+			return dberrors.New(dberrors.CodeConflict, "tx.commit", fmt.Sprintf("non-conflicting transaction based on %d requires rebase onto %d", record.ParentTxnID, validation.LatestTxnID))
+		}
 	}
 	if dirty {
-		if err := tx.db.publish(ctx, record); err != nil {
+		if err := tx.db.publishWithFootprint(ctx, record, &tx.work.writeFootprint); err != nil {
 			tx.work.writeTxn.CommitFailed()
 			tx.db.closeNativeWriteLocked(tx)
 			return err
@@ -208,6 +221,7 @@ func (db *DB) beginWriteLocked(owner uint64) error {
 	}
 	db.writeTxn = write
 	db.writeCatalog = db.catalog.Clone()
+	db.writeFootprint = txn.Footprint{}
 	db.txOwner = owner
 	return nil
 }
@@ -225,10 +239,23 @@ func (db *DB) commitWriteLocked(ctx context.Context, owner uint64) error {
 	if err != nil {
 		return err
 	}
-	if dirty && record.ParentTxnID != db.manifest.TxnID {
-		db.writeTxn.CommitFailed()
-		db.clearWrite()
-		return dberrors.New(dberrors.CodeConflict, "db.commit", fmt.Sprintf("transaction snapshot %d is stale; latest transaction is %d", record.ParentTxnID, db.manifest.TxnID))
+	if dirty {
+		validation, err := db.commitCoordinator().Validate(record.ParentTxnID, &db.writeFootprint)
+		if err != nil {
+			db.writeTxn.CommitFailed()
+			db.clearWrite()
+			return err
+		}
+		if len(validation.Conflicts) != 0 {
+			db.writeTxn.CommitFailed()
+			db.clearWrite()
+			return dberrors.New(dberrors.CodeConflict, "db.commit", fmt.Sprintf("logical write conflict on %d resource(s) since transaction %d", len(validation.Conflicts), record.ParentTxnID))
+		}
+		if validation.LatestTxnID != record.ParentTxnID {
+			db.writeTxn.CommitFailed()
+			db.clearWrite()
+			return dberrors.New(dberrors.CodeConflict, "db.commit", fmt.Sprintf("non-conflicting transaction based on %d requires rebase onto %d", record.ParentTxnID, validation.LatestTxnID))
+		}
 	}
 	if dirty {
 		if err := db.publish(ctx, record); err != nil {
@@ -277,6 +304,7 @@ func (db *DB) requireOwner(owner uint64) error {
 func (db *DB) clearWrite() {
 	db.writeTxn = nil
 	db.writeCatalog = nil
+	db.writeFootprint = txn.Footprint{}
 	db.txOwner = 0
 }
 
