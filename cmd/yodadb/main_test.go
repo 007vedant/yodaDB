@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"yodadb"
 	"yodadb/storage/manifest"
 	"yodadb/storage/page"
 )
@@ -17,8 +18,81 @@ func TestRunHelp(t *testing.T) {
 	if code := run([]string{"--help"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("run --help returned %d, want 0", code)
 	}
-	if !strings.Contains(stdout.String(), "Usage:") || !strings.Contains(stdout.String(), "inspect") || !strings.Contains(stdout.String(), "pages") {
+	if !strings.Contains(stdout.String(), "Usage:") || !strings.Contains(stdout.String(), "inspect") || !strings.Contains(stdout.String(), "pages") || !strings.Contains(stdout.String(), "history") {
 		t.Fatalf("help output %q does not contain usage and diagnostic commands", stdout.String())
+	}
+}
+
+func TestRunHistoryListsRangeRootsAndNamedSnapshots(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "history.yoda")
+	database, err := yodadb.Create(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(ctx, "CREATE TABLE users (id INT64 PRIMARY KEY, name TEXT NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(ctx, "INSERT INTO users VALUES (1, 'Ada')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSnapshot(ctx, "ada-release", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"history", path, "--from", "2", "--to", "3"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("history returned %d; stderr=%q", code, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"latest transaction: 3",
+		"oldest retained transaction: 0",
+		"named snapshots: 1",
+		`"ada-release" -> transaction 2`,
+		"transaction 2: parent=1",
+		"transaction 3: parent=2",
+		"table 1 root=",
+		"transactions shown: 2",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("history output %q does not contain %q", output, want)
+		}
+	}
+	if strings.Contains(output, "transaction 1: parent=") {
+		t.Fatalf("history output ignored --from: %q", output)
+	}
+}
+
+func TestRunHistoryRejectsPrunedRange(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "pruned-history.yoda")
+	database, err := yodadb.Create(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(ctx, "CREATE TABLE users (id INT64 PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(ctx, "INSERT INTO users VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RetainHistoryFrom(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"history", path, "--from", "1"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("history returned %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "history_not_retained") {
+		t.Fatalf("history stderr=%q", stderr.String())
 	}
 }
 

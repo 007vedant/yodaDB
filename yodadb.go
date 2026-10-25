@@ -13,6 +13,12 @@ type DB = db.DB
 // Tx is an explicit single-writer transaction handle.
 type Tx = db.Tx
 
+// ReadTx is a read-only transaction bound to one committed snapshot.
+type ReadTx = db.ReadTx
+
+// NamedSnapshot describes a durable name for one committed transaction.
+type NamedSnapshot = db.NamedSnapshot
+
 // Result describes a successfully executed non-query statement.
 type Result = db.Result
 
