@@ -955,7 +955,7 @@ Status: **in progress**
 | ID | Status | Task | Depends on | Deliverable |
 |---|---|---|---|---|
 | M7.1 | [x] verified | Logical write/read-set model | M6 | rows, unique keys, catalog objects |
-| M7.2 | [ ] not started | Concurrent transaction preparation | M7.1 | private changes without global writer lock |
+| M7.2 | [x] verified | Concurrent transaction preparation | M7.1 | private changes without global writer lock |
 | M7.3 | [ ] not started | Commit coordinator and validation | M7.1,M7.2 | conflict checks since base TxnID |
 | M7.4 | [ ] not started | Rebase/replay on latest roots | M7.3 | publish disjoint stale-snapshot writes |
 | M7.5 | [ ] not started | Unique/index/catalog conflicts | M7.3,M4 | constraint-correct validation |

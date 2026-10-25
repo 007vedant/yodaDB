@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"yodadb/db"
@@ -31,9 +32,7 @@ func TestTxReadOwnWritesAndOneManifestCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertTxStrings(t, tx, "SELECT value FROM events", []string{"alpha", "beta"})
-	if _, err := database.Query(ctx, "SELECT value FROM events"); !errors.Is(err, dberrors.ErrConflict) {
-		t.Fatalf("outside query error=%v, want conflict", err)
-	}
+	assertNoRow(t, database, "SELECT value FROM events")
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +64,155 @@ func TestTxReadOwnWritesAndOneManifestCommit(t *testing.T) {
 	}
 	defer database.Close()
 	assertStrings(t, database, "SELECT value FROM events", []string{"alpha", "beta"})
+}
+
+func TestConcurrentTransactionsPreparePrivateWrites(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "concurrent-preparation.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY, name TEXT NOT NULL)")
+
+	left, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	errorsByWriter := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	prepare := func(tx *db.Tx, sql string) {
+		ready.Done()
+		<-start
+		_, err := tx.Exec(ctx, sql)
+		errorsByWriter <- err
+	}
+	go prepare(left, "INSERT INTO users VALUES (1, 'Ada')")
+	go prepare(right, "INSERT INTO users VALUES (2, 'Grace')")
+	ready.Wait()
+	close(start)
+	for range 2 {
+		if err := <-errorsByWriter; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertTxStrings(t, left, "SELECT name FROM users WHERE id = 1", []string{"Ada"})
+	assertTxStrings(t, right, "SELECT name FROM users WHERE id = 2", []string{"Grace"})
+	assertNoRow(t, database, "SELECT name FROM users")
+	if err := left.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := right.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) {
+		t.Fatalf("stale commit error=%v, want conflict until M7.3 validation", err)
+	}
+	assertStrings(t, database, "SELECT name FROM users", []string{"Ada"})
+}
+
+func TestPrivateWriterDoesNotBlockCommittedAutocommit(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "writer-and-autocommit.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY)")
+
+	private, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := private.Exec(ctx, "INSERT INTO users VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, database, "INSERT INTO users VALUES (2)")
+	assertOneInt64(t, database, "SELECT id FROM users WHERE id = 2", 2)
+	if err := private.Commit(ctx); !errors.Is(err, dberrors.ErrConflict) {
+		t.Fatalf("stale private commit error=%v, want conflict", err)
+	}
+	assertNoRow(t, database, "SELECT id FROM users WHERE id = 1")
+}
+
+func TestReadOnlyPrivateTransactionCanCloseAfterSnapshotBecomesStale(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "stale-read-only-writer.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY)")
+
+	readOnly, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoTxRow(t, readOnly, "SELECT id FROM users")
+	mustExec(t, database, "INSERT INTO users VALUES (1)")
+	assertNoTxRow(t, readOnly, "SELECT id FROM users")
+	if err := readOnly.Commit(ctx); err != nil {
+		t.Fatalf("read-only stale commit error=%v", err)
+	}
+}
+
+func TestPrivateWriterPinsItsBaseAgainstHistoryRetention(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "writer-history-pin.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY)")
+
+	writer, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, database, "INSERT INTO users VALUES (1)")
+	if err := database.RetainHistoryFrom(ctx, 2); !errors.Is(err, dberrors.ErrConflict) {
+		t.Fatalf("retention past writer base error=%v, want conflict", err)
+	}
+	if err := writer.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RetainHistoryFrom(ctx, 2); err != nil {
+		t.Fatalf("retention after writer rollback: %v", err)
+	}
+}
+
+func TestCloseAbortsAllPrivateWriters(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Create(ctx, filepath.Join(t.TempDir(), "close-writers.yoda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, database, "CREATE TABLE users (id INT64 PRIMARY KEY)")
+	first, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := database.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Exec(ctx, "INSERT INTO users VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Rollback(); !errors.Is(err, dberrors.ErrTransactionClosed) {
+		t.Fatalf("first rollback after close error=%v", err)
+	}
+	if _, err := second.Query(ctx, "SELECT id FROM users"); !errors.Is(err, dberrors.ErrTransactionClosed) {
+		t.Fatalf("second query after close error=%v", err)
+	}
 }
 
 func TestTxRollbackLeavesNoReachableWrites(t *testing.T) {
@@ -242,6 +390,21 @@ func assertTxStrings(t *testing.T, tx *db.Tx, query string, want []string) {
 		if got[index] != want[index] {
 			t.Fatalf("query %q returned %v, want %v", query, got, want)
 		}
+	}
+}
+
+func assertNoTxRow(t *testing.T, tx *db.Tx, query string) {
+	t.Helper()
+	rows, err := tx.Query(context.Background(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatalf("query %q unexpectedly returned a row", query)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 

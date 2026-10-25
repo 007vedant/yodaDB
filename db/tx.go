@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"fmt"
+	"sync"
 
 	"yodadb/dberrors"
 	"yodadb/sql/binder"
@@ -9,15 +11,21 @@ import (
 	"yodadb/txn"
 )
 
-// Tx is the native handle for the single active write transaction. Reads use
-// its private roots, so statements observe earlier writes before commit.
+// Tx is a native write transaction with a private catalog and root set. Each
+// handle serializes its own statements, while separate handles may prepare
+// changes concurrently from committed snapshots.
 type Tx struct {
-	db *DB
-	id uint64
+	mu        sync.Mutex
+	db        *DB
+	work      *DB
+	id        uint64
+	baseTxnID uint64
 }
 
-// Begin starts the database's only active write transaction.
+// Begin starts a write transaction at the latest committed snapshot.
 func (db *DB) Begin(ctx context.Context) (*Tx, error) {
+	db.writerLifecycle.RLock()
+	defer db.writerLifecycle.RUnlock()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.closed {
@@ -34,10 +42,27 @@ func (db *DB) Begin(ctx context.Context) (*Tx, error) {
 	}
 	db.nextTxID++
 	owner := db.nextTxID
-	if err := db.beginWriteLocked(owner); err != nil {
+	base := cloneManifest(db.manifest)
+	write, err := txn.BeginWrite(base)
+	if err != nil {
 		return nil, err
 	}
-	return &Tx{db: db, id: owner}, nil
+	privateCatalog := db.catalog.Clone()
+	work := &DB{
+		catalog:      privateCatalog,
+		storage:      db.storage,
+		manifest:     base,
+		writeTxn:     write,
+		writeCatalog: privateCatalog,
+		txOwner:      owner,
+	}
+	handle := &Tx{db: db, work: work, id: owner, baseTxnID: base.TxnID}
+	if db.writers == nil {
+		db.writers = make(map[uint64]*Tx)
+	}
+	db.writers[owner] = handle
+	db.pinSnapshot(base.TxnID)
+	return handle, nil
 }
 
 // Execute parses, binds, and executes a statement in the transaction.
@@ -45,9 +70,14 @@ func (tx *Tx) Execute(ctx context.Context, sql string, arguments ...any) (Outcom
 	if tx == nil || tx.db == nil {
 		return Outcome{}, txClosed("tx.execute")
 	}
-	tx.db.mu.Lock()
-	defer tx.db.mu.Unlock()
-	return tx.db.executeSQLLocked(ctx, tx.id, sql, arguments)
+	tx.db.writerLifecycle.RLock()
+	defer tx.db.writerLifecycle.RUnlock()
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.db.closed || tx.work == nil {
+		return Outcome{}, txClosed("tx.execute")
+	}
+	return tx.work.executeSQLLocked(ctx, tx.id, sql, arguments)
 }
 
 // Exec executes a non-query statement in the transaction.
@@ -55,9 +85,14 @@ func (tx *Tx) Exec(ctx context.Context, sql string, arguments ...any) (Result, e
 	if tx == nil || tx.db == nil {
 		return Result{}, txClosed("tx.exec")
 	}
-	tx.db.mu.Lock()
-	defer tx.db.mu.Unlock()
-	return tx.db.execSQLLocked(ctx, tx.id, sql, arguments)
+	tx.db.writerLifecycle.RLock()
+	defer tx.db.writerLifecycle.RUnlock()
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.db.closed || tx.work == nil {
+		return Result{}, txClosed("tx.exec")
+	}
+	return tx.work.execSQLLocked(ctx, tx.id, sql, arguments)
 }
 
 // Query executes a SELECT or EXPLAIN against the transaction's private roots.
@@ -65,9 +100,14 @@ func (tx *Tx) Query(ctx context.Context, sql string, arguments ...any) (*Rows, e
 	if tx == nil || tx.db == nil {
 		return nil, txClosed("tx.query")
 	}
-	tx.db.mu.Lock()
-	defer tx.db.mu.Unlock()
-	return tx.db.querySQLLocked(ctx, tx.id, sql, arguments)
+	tx.db.writerLifecycle.RLock()
+	defer tx.db.writerLifecycle.RUnlock()
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.db.closed || tx.work == nil {
+		return nil, txClosed("tx.query")
+	}
+	return tx.work.querySQLLocked(ctx, tx.id, sql, arguments)
 }
 
 // Commit publishes all successful statements as one manifest transaction.
@@ -75,9 +115,45 @@ func (tx *Tx) Commit(ctx context.Context) error {
 	if tx == nil || tx.db == nil {
 		return txClosed("tx.commit")
 	}
+	tx.db.writerLifecycle.RLock()
+	defer tx.db.writerLifecycle.RUnlock()
 	tx.db.mu.Lock()
 	defer tx.db.mu.Unlock()
-	return tx.db.commitWriteLocked(ctx, tx.id)
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.db.closed || tx.work == nil || tx.db.writers[tx.id] != tx {
+		return txClosed("tx.commit")
+	}
+	if err := contextError(ctx, "tx.commit"); err != nil {
+		_ = tx.work.writeTxn.Rollback()
+		tx.db.closeNativeWriteLocked(tx)
+		return err
+	}
+	record, dirty, err := tx.work.writeTxn.PrepareCommit()
+	if err != nil {
+		return err
+	}
+	if dirty && record.ParentTxnID != tx.db.manifest.TxnID {
+		tx.work.writeTxn.CommitFailed()
+		tx.db.closeNativeWriteLocked(tx)
+		return dberrors.New(dberrors.CodeConflict, "tx.commit", fmt.Sprintf("transaction snapshot %d is stale; latest transaction is %d", record.ParentTxnID, tx.db.manifest.TxnID))
+	}
+	if dirty {
+		if err := tx.db.publish(ctx, record); err != nil {
+			tx.work.writeTxn.CommitFailed()
+			tx.db.closeNativeWriteLocked(tx)
+			return err
+		}
+	}
+	if err := tx.work.writeTxn.CommitSucceeded(); err != nil {
+		tx.db.closeNativeWriteLocked(tx)
+		return err
+	}
+	if dirty {
+		tx.db.catalog = tx.work.writeCatalog
+	}
+	tx.db.closeNativeWriteLocked(tx)
+	return nil
 }
 
 // Rollback discards the transaction's private roots. Appended COW pages remain
@@ -86,9 +162,18 @@ func (tx *Tx) Rollback() error {
 	if tx == nil || tx.db == nil {
 		return txClosed("tx.rollback")
 	}
+	tx.db.writerLifecycle.RLock()
+	defer tx.db.writerLifecycle.RUnlock()
 	tx.db.mu.Lock()
 	defer tx.db.mu.Unlock()
-	return tx.db.rollbackWriteLocked(tx.id)
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.db.closed || tx.work == nil || tx.db.writers[tx.id] != tx {
+		return txClosed("tx.rollback")
+	}
+	err := tx.work.writeTxn.Rollback()
+	tx.db.closeNativeWriteLocked(tx)
+	return err
 }
 
 func (db *DB) executeTransactionControl(ctx context.Context, owner uint64, control *binder.TransactionControl) (Outcome, error) {
@@ -140,6 +225,11 @@ func (db *DB) commitWriteLocked(ctx context.Context, owner uint64) error {
 	if err != nil {
 		return err
 	}
+	if dirty && record.ParentTxnID != db.manifest.TxnID {
+		db.writeTxn.CommitFailed()
+		db.clearWrite()
+		return dberrors.New(dberrors.CodeConflict, "db.commit", fmt.Sprintf("transaction snapshot %d is stale; latest transaction is %d", record.ParentTxnID, db.manifest.TxnID))
+	}
 	if dirty {
 		if err := db.publish(ctx, record); err != nil {
 			db.writeTxn.CommitFailed()
@@ -188,6 +278,15 @@ func (db *DB) clearWrite() {
 	db.writeTxn = nil
 	db.writeCatalog = nil
 	db.txOwner = 0
+}
+
+func (db *DB) closeNativeWriteLocked(tx *Tx) {
+	delete(db.writers, tx.id)
+	db.unpinSnapshot(tx.baseTxnID)
+	if tx.work != nil {
+		tx.work.clearWrite()
+		tx.work = nil
+	}
 }
 
 func contextError(ctx context.Context, operation string) error {

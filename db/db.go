@@ -25,17 +25,19 @@ import (
 // DB is a yodaDB handle backed either by in-memory execution or a persistent
 // page file opened through Create or Open.
 type DB struct {
-	mu           sync.RWMutex
-	closed       bool
-	catalog      *catalog.Catalog
-	engine       *sqlexec.Engine
-	storage      *manifest.Database
-	manifest     manifest.Manifest
-	writeTxn     *txn.Write
-	writeCatalog *catalog.Catalog
-	readPins     map[uint64]uint64
-	txOwner      uint64
-	nextTxID     uint64
+	mu              sync.RWMutex
+	writerLifecycle sync.RWMutex
+	closed          bool
+	catalog         *catalog.Catalog
+	engine          *sqlexec.Engine
+	storage         *manifest.Database
+	manifest        manifest.Manifest
+	writeTxn        *txn.Write
+	writeCatalog    *catalog.Catalog
+	writers         map[uint64]*Tx
+	readPins        map[uint64]uint64
+	txOwner         uint64
+	nextTxID        uint64
 }
 
 // Durability is the persistence contract for successful commits.
@@ -205,11 +207,23 @@ func (db *DB) querySQLLocked(ctx context.Context, owner uint64, sql string, argu
 // Close rolls back any active transaction and releases the database handle. It
 // is idempotent.
 func (db *DB) Close() error {
+	db.writerLifecycle.Lock()
+	defer db.writerLifecycle.Unlock()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.writeTxn != nil {
 		_ = db.writeTxn.Rollback()
 		db.clearWrite()
+	}
+	for id, writer := range db.writers {
+		writer.mu.Lock()
+		if writer.work != nil && writer.work.writeTxn != nil {
+			_ = writer.work.writeTxn.Rollback()
+			writer.work.clearWrite()
+			writer.work = nil
+		}
+		writer.mu.Unlock()
+		delete(db.writers, id)
 	}
 	db.readPins = nil
 	db.closed = true

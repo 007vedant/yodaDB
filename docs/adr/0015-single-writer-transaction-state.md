@@ -1,6 +1,6 @@
 # ADR 0015: Use private root sets for single-writer transactions
 
-- Status: Accepted
+- Status: Superseded by ADR 0020
 - Date: 2026-10-23
 - Owners: transactions and public API
 
